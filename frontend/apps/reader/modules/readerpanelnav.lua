@@ -1,7 +1,22 @@
 --[[--
 Panel-by-panel navigation for comics and manga in paged documents.
 
-The panels detected on the page are visited in the panel reading direction.
+The panels of a page are shown one at a time in a @{ui.widget.panelviewer|PanelViewer}, in the panel
+reading direction: by default, the page turn direction (right to left with RTL page turning, as for
+manga). The last panel of a page is followed by the first one of the next page, and a page without
+panels is shown whole.
+
+By default, a panel is shown over the page, which stays visible around it: enlarged by the
+panel_overlay_zoom setting, centred on the screen, and framed on the page. Otherwise (panel_view_mode
+"fullscreen"), it is shown alone, as big as the screen allows, and wide panels can be rotated.
+
+Navigation starts with a long-press on a panel when panel zoom is allowed, or with the "Enter panel
+navigation", "Next panel" and "Previous panel" actions. It ends when the viewer is closed, on the
+page of the last panel shown.
+
+Panels are only detected for the pages shown in the viewer (or with the debug panel boxes). Pages
+that are not made of panels (text, title and illustration pages, splash pages) have none: they are
+shown whole, see KOPTContext:getAllPanelsFromPage().
 
 @module readerpanelnav
 --]]
@@ -13,30 +28,36 @@ local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
 local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
-local InputContainer = require("ui/widget/container/inputcontainer")
+local Notification = require("ui/widget/notification")
+local PanelViewer = require("ui/widget/panelviewer")
 local RenderText = require("ui/rendertext")
-local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local dbg = require("dbg")
 local logger = require("logger")
 local optionsutil = require("ui/data/optionsutil")
 local _ = require("gettext")
+local N_ = _.ngettext
+local Input = Device.input
 local Screen = Device.screen
+local T = require("ffi/util").template
 
-local ReaderPanelNav = InputContainer:extend{
+local ReaderPanelNav = WidgetContainer:extend{
     name = "readerpanelnav",
-    -- Panel navigation state
-    panel_nav_enabled = false,
-    current_page_panels = nil,  -- cached panels for current page
-    current_panel_index = 0,    -- 0 means no panel selected (full page view)
-    panels_page = nil,          -- page number for cached panels
-    _panel_viewer = nil,        -- current ImageViewer widget (reused for performance)
+    -- The panels of panels_page sorted in panels_direction, see getPanelsForPage()
+    current_page_panels = nil,
+    panels_page = nil,
+    panels_direction = nil,
+    current_panel_index = 0, -- of the last panel shown, in current_page_panels: 0 if none (or the whole page)
+    _panel_viewer = nil, -- the PanelViewer, while navigating
 
-    -- Visualization options
-    highlight_current_panel = false, -- highlight only the current panel
-    show_panel_boxes = false,   -- show bounding boxes around all detected panels (debug)
-
-    panel_direction = "LRTB", -- one of the keys of direction_settings
+    -- Settings
+    panel_view_mode = "overlay", -- "overlay": over the page, "fullscreen": alone, see getDefaultViewMode()
+    panel_overlay_zoom = 1.5, -- over the page: size of the panel to its size on the page, or "fit" the screen
+    panel_direction = nil, -- one of the keys of direction_settings, nil to follow the page turn direction
+    panel_rotate_wide = true, -- fullscreen: rotate wide panels to show them bigger, see isWidePanel()
+    highlight_current_panel = false, -- frame the last panel shown, on the page
+    show_panel_boxes = false, -- debug: frame all the panels detected on the page, with their number
 
     -- Each direction defines: primary axis (h/v), primary order (+/-), secondary order (+/-)
     -- h = horizontal first (row mode), v = vertical first (column mode)
@@ -64,19 +85,53 @@ end
 
 function ReaderPanelNav:init()
     self:onDispatcherRegisterActions()
-    -- Register as view module to draw panel boxes
+    -- to draw the panel boxes
     self.view:registerViewModule("panel_nav", self)
 end
 
+local function isViewMode(mode)
+    return mode == "overlay" or mode == "fullscreen"
+end
+
+local function isOverlayZoom(zoom)
+    return zoom == "fit" or type(zoom) == "number" and zoom > 0
+end
+
+--[[--
+Get how the panels of newly opened books are shown.
+
+@treturn string "overlay" (the default) or "fullscreen", the panel_view_mode setting
+--]]
+function ReaderPanelNav.getDefaultViewMode()
+    local mode = G_reader_settings:readSetting("panel_view_mode")
+    return isViewMode(mode) and mode or "overlay"
+end
+
+--[[--
+Get the zoom of the panels shown over the page, for newly opened books.
+
+@return the panel_overlay_zoom setting: the size of a panel to its size on the page (1.5 by
+default), or "fit" to show it as big as fits on the screen
+--]]
+function ReaderPanelNav.getDefaultOverlayZoom()
+    local zoom = G_reader_settings:readSetting("panel_overlay_zoom")
+    return isOverlayZoom(zoom) and zoom or 1.5
+end
+
 function ReaderPanelNav:onReadSettings(config)
-    if config:has("panel_nav_enabled") then
-        self.panel_nav_enabled = config:isTrue("panel_nav_enabled")
-    else
-        self.panel_nav_enabled = G_reader_settings:isTrue("panel_nav_enabled")
+    local view_mode = config:readSetting("panel_view_mode")
+    self.panel_view_mode = isViewMode(view_mode) and view_mode or self.getDefaultViewMode()
+    local overlay_zoom = config:readSetting("panel_overlay_zoom")
+    self.panel_overlay_zoom = isOverlayZoom(overlay_zoom) and overlay_zoom or self.getDefaultOverlayZoom()
+    self.panel_direction = config:readSetting("panel_direction") or G_reader_settings:readSetting("panel_direction")
+    if not self.direction_settings[self.panel_direction] then
+        self.panel_direction = nil
     end
-    self.panel_direction = config:readSetting("panel_direction")
-        or G_reader_settings:readSetting("panel_direction")
-        or "LRTB"
+    if config:has("panel_rotate_wide") then
+        self.panel_rotate_wide = config:isTrue("panel_rotate_wide")
+    else
+        self.panel_rotate_wide = G_reader_settings:nilOrTrue("panel_rotate_wide")
+    end
     if config:has("highlight_current_panel") then
         self.highlight_current_panel = config:isTrue("highlight_current_panel")
     else
@@ -89,27 +144,54 @@ function ReaderPanelNav:onReadSettings(config)
     end
 end
 
+-- The book only keeps the settings that differ from the defaults for newly opened books
+local function saveSettingIfNotDefault(doc_settings, key, value, default)
+    if value ~= nil and value ~= default then
+        doc_settings:saveSetting(key, value)
+    else
+        doc_settings:delSetting(key)
+    end
+end
+
 function ReaderPanelNav:onSaveSettings()
-    self.ui.doc_settings:saveSetting("panel_nav_enabled", self.panel_nav_enabled)
-    self.ui.doc_settings:saveSetting("panel_direction", self.panel_direction)
-    self.ui.doc_settings:saveSetting("highlight_current_panel", self.highlight_current_panel)
-    self.ui.doc_settings:saveSetting("show_panel_boxes", self.show_panel_boxes)
+    local doc_settings = self.ui.doc_settings
+    saveSettingIfNotDefault(doc_settings, "panel_view_mode", self.panel_view_mode, self.getDefaultViewMode())
+    saveSettingIfNotDefault(doc_settings, "panel_overlay_zoom", self.panel_overlay_zoom, self.getDefaultOverlayZoom())
+    -- nil, following the page turn direction, is never saved
+    saveSettingIfNotDefault(doc_settings, "panel_direction", self.panel_direction,
+        G_reader_settings:readSetting("panel_direction"))
+    saveSettingIfNotDefault(doc_settings, "panel_rotate_wide", self.panel_rotate_wide,
+        G_reader_settings:nilOrTrue("panel_rotate_wide"))
+    saveSettingIfNotDefault(doc_settings, "highlight_current_panel", self.highlight_current_panel,
+        G_reader_settings:isTrue("highlight_current_panel"))
+    saveSettingIfNotDefault(doc_settings, "show_panel_boxes", self.show_panel_boxes,
+        G_reader_settings:isTrue("show_panel_boxes"))
+end
+
+--[[--
+Get the panel reading direction.
+
+@treturn string Direction code: the panel_direction setting, or else RLTB with RTL page turning
+(page turns inverted, or not inverted with a mirrored UI, as in ReaderView:getTapZones()), LRTB otherwise
+--]]
+function ReaderPanelNav:getPanelDirection()
+    local rtl_page_turning = self.view.inverse_reading_order and true or false
+    if BD.mirroredUILayout() then
+        rtl_page_turning = not rtl_page_turning
+    end
+    return self.panel_direction or (rtl_page_turning and "RLTB" or "LRTB")
 end
 
 --[[--
 Set panel reading direction.
 
-@param direction string Direction code (LRTB, LRBT, RLTB, RLBT, TBLR, TBRL, BTLR, BTRL)
+@param direction string Direction code (LRTB, LRBT, RLTB, RLBT, TBLR, TBRL, BTLR, BTRL), or nil to follow the page turn direction
 --]]
 function ReaderPanelNav:setPanelDirection(direction)
-    if self.direction_settings[direction] then
+    if direction == nil or self.direction_settings[direction] then
         self.panel_direction = direction
-        -- Invalidate cached panels when direction changes
-        self.current_page_panels = nil
-        self.panels_page = nil
-        self.current_panel_index = 0
-        -- Refresh display if showing panel boxes
-        if self.show_panel_boxes then
+        -- the panels get sorted again when needed, see getPanelsForPage()
+        if self.show_panel_boxes or self.highlight_current_panel then
             UIManager:setDirty(self.view.dialog, "ui")
         end
     end
@@ -250,14 +332,42 @@ Sort panels by reading direction using coordinate transformation.
 Transforms all coordinates to LRTB-equivalent, sorts using sortLRTB,
 then maps back to original panels with row/col assigned.
 
+On a double-page spread (a page wider than high) with each panel on one of its halves, the panels
+of one half come before those of the other: the right half first when reading from right to left.
+
 @param panels array of panel rectangles {x, y, w, h}
+@param direction string Direction code, by default the panel reading direction
+@param[opt] page_size size {w, h} of the page
 @treturn table sorted array of panels with row/col fields added, or nil if no panels
 --]]
-function ReaderPanelNav:sortPanelsByReadingDirection(panels)
+function ReaderPanelNav:sortPanelsByReadingDirection(panels, direction, page_size)
     if not panels or #panels == 0 then return end
 
-    local direction = self.panel_direction or "LRTB"
+    direction = direction or self:getPanelDirection()
     local primary, secondary = direction:sub(1, 2), direction:sub(3, 4)
+
+    if page_size and page_size.w > page_size.h then
+        local middle, margin = page_size.w / 2, page_size.w * 0.02
+        local left, right = {}, {}
+        for _, p in ipairs(panels) do
+            if p.x + p.w <= middle + margin then
+                table.insert(left, p)
+            elseif p.x >= middle - margin then
+                table.insert(right, p)
+            else -- across both pages
+                left = nil
+                break
+            end
+        end
+        if left and #left > 0 and #right > 0 then
+            local rtl = primary == "RL" or secondary == "RL"
+            local sorted = self:sortPanelsByReadingDirection(rtl and right or left, direction)
+            for _, p in ipairs(self:sortPanelsByReadingDirection(rtl and left or right, direction)) do
+                table.insert(sorted, p)
+            end
+            return sorted
+        end
+    end
     local is_row_first = (primary == "LR" or primary == "RL")
 
     -- transform the coordinates so that the panels can be sorted as LRTB
@@ -305,174 +415,6 @@ function ReaderPanelNav:sortPanelsByReadingDirection(panels)
 end
 
 --[[--
-Check if panel A is completely contained within panel B.
-
-@param a panel rectangle {x, y, w, h}
-@param b panel rectangle {x, y, w, h}
-@treturn bool true if A is completely inside B
---]]
-function ReaderPanelNav:isPanelContainedIn(a, b)
-    return a.x >= b.x and a.x + a.w <= b.x + b.w and
-           a.y >= b.y and a.y + a.h <= b.y + b.h
-end
-
---[[--
-Filter out panels that are completely contained within other panels.
-Keeps only the outermost panels.
-
-@param panels array of panel rectangles {x, y, w, h}
-@treturn table filtered array of panels, or nil if no panels
---]]
-function ReaderPanelNav:filterNestedPanels(panels)
-    if not panels or #panels == 0 then
-        return
-    end
-    if #panels == 1 then
-        return panels
-    end
-
-    local filtered = {}
-
-    for i, panel_a in ipairs(panels) do
-        local is_nested = false
-
-        for j, panel_b in ipairs(panels) do
-            if i ~= j then
-                -- equal panels are not nested
-                if self:isPanelContainedIn(panel_a, panel_b) and
-                   not self:isPanelContainedIn(panel_b, panel_a) then
-                    is_nested = true
-                    break
-                end
-            end
-        end
-
-        if not is_nested then
-            table.insert(filtered, panel_a)
-        end
-    end
-
-    logger.dbg("ReaderPanelNav: filtered", #panels - #filtered, "nested panels, keeping", #filtered)
-    return filtered
-end
-
---[[--
-Calculate the intersection area of two panels.
-
-@param a panel rectangle {x, y, w, h}
-@param b panel rectangle {x, y, w, h}
-@treturn number intersection area (0 if no overlap)
---]]
-function ReaderPanelNav:getPanelIntersectionArea(a, b)
-    local a_left, a_right = a.x, a.x + a.w
-    local a_top, a_bottom = a.y, a.y + a.h
-    local b_left, b_right = b.x, b.x + b.w
-    local b_top, b_bottom = b.y, b.y + b.h
-
-    local inter_left = math.max(a_left, b_left)
-    local inter_right = math.min(a_right, b_right)
-    local inter_top = math.max(a_top, b_top)
-    local inter_bottom = math.min(a_bottom, b_bottom)
-
-    local inter_width = inter_right - inter_left
-    local inter_height = inter_bottom - inter_top
-
-    if inter_width > 0 and inter_height > 0 then
-        return inter_width * inter_height
-    end
-    return 0
-end
-
---[[--
-Merge two panels into their bounding box.
-
-@param a panel rectangle {x, y, w, h}
-@param b panel rectangle {x, y, w, h}
-@treturn table merged panel rectangle {x, y, w, h}
---]]
-function ReaderPanelNav:mergePanels(a, b)
-    local left = math.min(a.x, b.x)
-    local top = math.min(a.y, b.y)
-    local right = math.max(a.x + a.w, b.x + b.w)
-    local bottom = math.max(a.y + a.h, b.y + b.h)
-
-    return {
-        x = left,
-        y = top,
-        w = right - left,
-        h = bottom - top,
-    }
-end
-
---[[--
-Merge overlapping panels into single panels.
-If two panels overlap significantly (> threshold of smaller panel's area),
-they are merged into their bounding box.
-
-@param panels array of panel rectangles {x, y, w, h}
-@param overlap_threshold fraction of overlap required to merge (default 0.3 = 30%)
-@treturn table array of merged panels, or nil if no panels
---]]
-function ReaderPanelNav:mergeOverlappingPanels(panels, overlap_threshold)
-    if not panels or #panels == 0 then
-        return
-    end
-    if #panels == 1 then
-        return panels
-    end
-
-    overlap_threshold = overlap_threshold or 0.3
-
-    -- keep merging until no more merges happen
-    local merged = true
-    local result = {}
-    for _, p in ipairs(panels) do
-        table.insert(result, { x = p.x, y = p.y, w = p.w, h = p.h })
-    end
-
-    while merged do
-        merged = false
-        local new_result = {}
-        local merged_indices = {}
-
-        for i = 1, #result do
-            if not merged_indices[i] then
-                local current = result[i]
-
-                for j = i + 1, #result do
-                    if not merged_indices[j] then
-                        local other = result[j]
-                        local intersection = self:getPanelIntersectionArea(current, other)
-
-                        if intersection > 0 then
-                            local area_current = current.w * current.h
-                            local area_other = other.w * other.h
-                            local smaller_area = math.min(area_current, area_other)
-                            if intersection / smaller_area >= overlap_threshold then
-                                current = self:mergePanels(current, other)
-                                merged_indices[j] = true
-                                merged = true
-                            end
-                        end
-                    end
-                end
-
-                table.insert(new_result, current)
-            end
-        end
-
-        result = new_result
-    end
-
-    local merged_count = #panels - #result
-    if merged_count > 0 then
-        logger.dbg("ReaderPanelNav: merged", merged_count, "overlapping panels, now have", #result)
-    end
-
-    return result
-end
-
---[[--
 Clip panels to ensure they are within page boundaries.
 Panels that extend outside the page are clipped to the page bounds.
 Panels that are completely outside the page are removed.
@@ -517,406 +459,351 @@ function ReaderPanelNav:clipPanelsToPage(panels, page_width, page_height)
 end
 
 --[[--
-Get panels for the current page, sorted by reading direction.
+Get the panels of a page, sorted in the panel reading direction.
 
-@treturn table array of sorted panels, or nil if no panels found
+They are detected the first time they are needed, and kept until the page changes. Panels within
+others (insets) are kept: the detection only gives the panels to show.
+
+@param pageno page number
+@treturn table array of panel rectangles {x, y, w, h} in native page coordinates, with their row
+and col, or nil if there are none (or the document has no panel detection)
 --]]
-function ReaderPanelNav:getPanelsForCurrentPage()
-    -- Check if document supports panel detection
+function ReaderPanelNav:getPanelsForPage(pageno)
     if not self.ui.document.getAllPanelsFromPage then
         return nil
     end
-
-    local pageno = self.ui.paging.current_page
-
-    -- Return cached panels if available for current page
-    if self.current_page_panels and self.panels_page == pageno then
+    local direction = self:getPanelDirection()
+    if self.panels_page == pageno and self.panels_direction == direction then
         return self.current_page_panels
     end
 
     local panels = self.ui.document:getAllPanelsFromPage(pageno)
-    if panels then
-        local page_size = self.ui.document:getNativePageDimensions(pageno)
-        if page_size then
-            panels = self:clipPanelsToPage(panels, page_size.w, page_size.h)
-        end
+    local page_size = self.ui.document:getNativePageDimensions(pageno)
+    if panels and page_size then
+        panels = self:clipPanelsToPage(panels, page_size.w, page_size.h)
     end
-    -- merging and filtering never leave a page without panels
     if panels then
-        panels = self:mergeOverlappingPanels(panels, 0.5)
-        panels = self:filterNestedPanels(panels)
-        panels = self:sortPanelsByReadingDirection(panels)
-        self.current_panel_index = 0 -- full page view
+        panels = self:sortPanelsByReadingDirection(panels, direction, page_size)
     end
     self.current_page_panels = panels
     self.panels_page = pageno
+    self.panels_direction = direction
+    -- an index in the previous panels means nothing now
+    self.current_panel_index = 0
     return panels
 end
 
 --[[--
-Navigate to the next panel.
+Get the panels of the current page, sorted in the panel reading direction.
 
-@treturn bool true if handled
+@treturn table array of panel rectangles, or nil, see getPanelsForPage()
 --]]
-function ReaderPanelNav:onGotoNextPanel()
-    logger.dbg("ReaderPanelNav:onGotoNextPanel called, enabled:", self.panel_nav_enabled)
-
-    if not self.panel_nav_enabled then
-        return false
-    end
-
-    local panels = self:getPanelsForCurrentPage()
-    logger.dbg("ReaderPanelNav: panels count:", panels and #panels or 0, "current index:", self.current_panel_index)
-
-    if not panels then
-        -- No panels on this page, go to next page
-        logger.dbg("ReaderPanelNav: no panels, going to next page")
-        self.ui:handleEvent(Event:new("GotoViewRel", 1))
-        return true
-    end
-
-    if self.current_panel_index < #panels then
-        -- Go to next panel
-        self.current_panel_index = self.current_panel_index + 1
-        logger.dbg("ReaderPanelNav: navigating to panel", self.current_panel_index)
-        self:showPanel(panels[self.current_panel_index])
-    else
-        -- At last panel, go to next page
-        logger.dbg("ReaderPanelNav: at last panel, going to next page")
-        self.current_panel_index = 0
-        self.current_page_panels = nil
-        self.panels_page = nil
-        self.ui:handleEvent(Event:new("GotoViewRel", 1))
-    end
-
-    return true
+function ReaderPanelNav:getPanelsForCurrentPage()
+    return self:getPanelsForPage(self.ui.paging.current_page)
 end
 
 --[[--
-Navigate to the previous panel.
+Check whether a panel is wide, so that it is shown bigger rotated.
 
-@treturn bool true if handled
---]]
-function ReaderPanelNav:onGotoPrevPanel()
-    if not self.panel_nav_enabled then
-        return false
-    end
-
-    local panels = self:getPanelsForCurrentPage()
-
-    if self.current_panel_index > 1 then
-        -- Go to previous panel
-        self.current_panel_index = self.current_panel_index - 1
-        self:showPanel(panels[self.current_panel_index])
-    elseif self.current_panel_index == 1 then
-        -- At first panel, show full page
-        self.current_panel_index = 0
-        self:showFullPage()
-    else
-        -- At full page view, go to previous page and show last panel
-        self.current_page_panels = nil
-        self.panels_page = nil
-        self.ui:handleEvent(Event:new("GotoViewRel", -1))
-        UIManager:nextTick(function()
-            local new_panels = self:getPanelsForCurrentPage()
-            if new_panels then
-                self.current_panel_index = #new_panels
-                self:showPanel(new_panels[self.current_panel_index])
-            end
-        end)
-    end
-
-    return true
-end
-
---[[--
-Show a specific panel in the ImageViewer.
+It is when its orientation differs from the screen's, and its aspect ratio is at least the screen's:
+then, rotated, it is as much bigger as the screen is longer than wide. (Most panels in a row of two
+are only a bit wider than tall: rotated, they would be only that bit bigger.)
 
 @param panel panel rectangle {x, y, w, h}
+@param area size {w, h} the panel is shown in (default: the screen)
+@treturn bool
+--]]
+function ReaderPanelNav:isWidePanel(panel, area)
+    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
+    if area then
+        screen_w, screen_h = area.w, area.h
+    end
+    if (screen_w > screen_h) == (panel.w > panel.h) then
+        return false
+    end
+    local screen_ratio = math.max(screen_w, screen_h) / math.min(screen_w, screen_h)
+    local panel_ratio = math.max(panel.w, panel.h) / math.min(panel.w, panel.h)
+    return screen_ratio > 1 and panel_ratio >= screen_ratio
+end
+
+--[[--
+Get the tap zones going to the next and previous panel in the viewer.
+
+They are the page turn tap zones, unless one-handed navigation is on (the panel_nav_one_hand
+setting: "left" or "right"): then a full-height strip on the side of the hand holding the device,
+as wide as the backward page turn tap zone (from 10 to 50 % of the screen width), goes back, and
+the rest of the screen forward. They are not mirrored with the reading direction (nor with the UI):
+the hand is not related to it.
+
+@treturn table forward zone {ratio_x, ratio_y, ratio_w, ratio_h}
+@treturn table backward zone
+--]]
+function ReaderPanelNav:getTapZones()
+    local hand = G_reader_settings:readSetting("panel_nav_one_hand")
+    if hand ~= "left" and hand ~= "right" then
+        return self.view:getTapZones()
+    end
+    -- the backward tap zone size, as ReaderView:getTapZones() and the page turns menu use it
+    local strip_w = G_defaults:readSetting("DTAP_ZONE_BACKWARD").w
+    if G_reader_settings:readSetting("page_turns_tap_zones", "default") ~= "default" then
+        strip_w = G_reader_settings:readSetting("page_turns_tap_zone_backward_size_ratio", strip_w)
+    end
+    -- both ways remain within reach of the thumb
+    strip_w = math.max(0.1, math.min(strip_w, 0.5))
+    if hand == "left" then
+        return { ratio_x = strip_w, ratio_y = 0, ratio_w = 1 - strip_w, ratio_h = 1 },
+               { ratio_x = 0, ratio_y = 0, ratio_w = strip_w, ratio_h = 1 }
+    end
+    return { ratio_x = 0, ratio_y = 0, ratio_w = 1 - strip_w, ratio_h = 1 },
+           { ratio_x = 1 - strip_w, ratio_y = 0, ratio_w = strip_w, ratio_h = 1 }
+end
+
+--[[--
+Show a panel of the current page in the viewer, opening it if needed.
+
+Over the page (panel_view_mode "overlay"), the panel is rendered at panel_overlay_zoom times its
+size on the page, at most as big as fits above the footer, and the viewer frames it where it is on
+the page. Fullscreen, it is rendered as big as fits above the footer, rotated if it is wide and
+panel_rotate_wide is on. The view stays the same until the viewer closes.
+
+@param panel panel rectangle {x, y, w, h}, in native page coordinates
 --]]
 function ReaderPanelNav:showPanel(panel)
     dbg.dassert(panel, "showPanel called with nil panel")
-
-    logger.dbg("ReaderPanelNav: showPanel called with panel:", panel)
-
-    local pageno = self.ui.paging.current_page
-    logger.dbg("ReaderPanelNav: drawing panel from page", pageno)
-
-    -- Make sure we have the drawPagePart method
-    if not self.ui.document.drawPagePart then
-        logger.dbg("ReaderPanelNav: document does not support drawPagePart")
-        UIManager:show(InfoMessage:new{
-            text = _("Panel zoom not supported for this document type."),
-            timeout = 2,
-        })
-        return
-    end
-
-    local image, rotate = self.ui.document:drawPagePart(pageno, panel, 0)
-
-    if image then
-        -- If we already have an ImageViewer open, just update the image
-        if self._panel_viewer then
-            logger.dbg("ReaderPanelNav: reusing existing ImageViewer")
-            -- Guard against updating while a repaint is in progress
-            if self._panel_viewer._updating then
-                logger.dbg("ReaderPanelNav: skipping update, already updating")
-                return
-            end
-            self._panel_viewer._updating = true
-            self._panel_viewer.image = image
-            -- Immediately clean the image widget so any pending refresh uses new image
-            self._panel_viewer:_clean_image_wg()
-            -- Now trigger the update synchronously
-            self._panel_viewer:update()
-            self._panel_viewer._updating = false
-            return
-        end
-
-        logger.dbg("ReaderPanelNav: creating new ImageViewer")
-        local ImageViewer = require("ui/widget/imageviewer")
-
-        -- Keep reference to self for callbacks
-        local panelnav = self
-
-        -- Calculate height to leave room for status bar (footer)
-        local footer_height = 0
-        if self.view.footer and self.view.footer_visible
-           and not self.view.footer.settings.reclaim_height then
-            footer_height = self.view.footer:getHeight()
-        end
-        local viewer_height = Screen:getHeight() - footer_height
-
-        local imgviewer = ImageViewer:new{
-            image = image,
-            image_disposable = false, -- It's a TileCache item
-            with_title_bar = false,
-            fullscreen = true,
-            rotated = rotate,
-            height = viewer_height, -- Leave room for footer
-        }
-
-        -- Patch update() to use our custom height (leaving room for footer)
-        -- This ensures buttons appear above the status bar
-        local orig_update = imgviewer.update
-        imgviewer.update = function(iv)
-            -- Temporarily override height before update runs
-            local saved_getHeight = Screen.getHeight
-            Screen.getHeight = function() return viewer_height end
-            orig_update(iv)
-            Screen.getHeight = saved_getHeight
-            -- Also ensure region is correct
-            iv.region.h = viewer_height
-        end
-
-        -- Paint footer on top of ImageViewer if visible
-        if footer_height > 0 then
-            local orig_paintTo = imgviewer.paintTo
-            local last_footer_page = pageno  -- Track which page footer was last updated for
-            imgviewer.paintTo = function(self_viewer, bb, x, y)
-                orig_paintTo(self_viewer, bb, x, y)
-                -- Paint footer at the bottom of the screen
-                if panelnav.view.footer and panelnav.view.footer_visible then
-                    local current_page = panelnav.ui.paging.current_page
-                    -- Only refresh footer content when page changes
-                    if current_page ~= last_footer_page then
-                        logger.dbg("ReaderPanelNav: page changed from", last_footer_page, "to", current_page, "- refreshing footer")
-                        panelnav.view.footer:onUpdateFooter(true)
-                        last_footer_page = current_page
-                    end
-                    panelnav.view.footer:paintTo(bb, x, y)
-                end
-            end
-        end
-
-        -- Only add panel navigation if enabled
-        if self.panel_nav_enabled then
-            local is_rtl = BD.mirroredUILayout()
-
-            -- Panel navigation handlers
-            imgviewer.onNextPanel = function(self_viewer)
-                local cur_panels = panelnav:getPanelsForCurrentPage()
-                if cur_panels and panelnav.current_panel_index < #cur_panels then
-                    -- Same page: just update the image in place
-                    panelnav.current_panel_index = panelnav.current_panel_index + 1
-                    panelnav:showPanel(cur_panels[panelnav.current_panel_index])
-                elseif cur_panels then
-                    -- End of page: go to next page, keep viewer open
-                    -- Do everything in one tick so image updates before repaint
-                    panelnav.current_panel_index = 0
-                    panelnav.current_page_panels = nil
-                    panelnav.panels_page = nil
-                    UIManager:nextTick(function()
-                        panelnav.ui:handleEvent(Event:new("GotoViewRel", 1))
-                        local new_panels = panelnav:getPanelsForCurrentPage()
-                        if new_panels then
-                            panelnav.current_panel_index = 1
-                            panelnav:showPanel(new_panels[1])
-                        else
-                            -- No panels on new page, close viewer
-                            UIManager:close(self_viewer)
-                        end
-                    end)
-                end
-                return true
-            end
-
-            imgviewer.onPrevPanel = function(self_viewer)
-                local cur_panels = panelnav:getPanelsForCurrentPage()
-                if panelnav.current_panel_index > 1 then
-                    -- Same page: just update the image in place
-                    panelnav.current_panel_index = panelnav.current_panel_index - 1
-                    panelnav:showPanel(cur_panels[panelnav.current_panel_index])
-                else
-                    -- Start of page: go to previous page, keep viewer open
-                    -- Do everything in one tick so image updates before repaint
-                    panelnav.current_page_panels = nil
-                    panelnav.panels_page = nil
-                    UIManager:nextTick(function()
-                        panelnav.ui:handleEvent(Event:new("GotoViewRel", -1))
-                        local new_panels = panelnav:getPanelsForCurrentPage()
-                        if new_panels then
-                            panelnav.current_panel_index = #new_panels
-                            panelnav:showPanel(new_panels[panelnav.current_panel_index])
-                        else
-                            -- No panels on new page, close viewer
-                            UIManager:close(self_viewer)
-                        end
-                    end)
-                end
-                return true
-            end
-
-            -- Key bindings (replace default zoom with panel navigation)
-            if Device:hasKeys() then
-                imgviewer.key_events.ZoomIn = nil
-                imgviewer.key_events.ZoomOut = nil
-                imgviewer.key_events.NextPanel = { { { "RPgFwd", "LPgFwd", is_rtl and "Left" or "Right" } }, event = "NextPanel" }
-                imgviewer.key_events.PrevPanel = { { { "RPgBack", "LPgBack", is_rtl and "Right" or "Left" } }, event = "PrevPanel" }
-            end
-
-            -- Touch zones (tap left/right edges)
-            if Device:isTouchDevice() then
-                imgviewer:registerTouchZones({
-                    {
-                        id = "panel_tap_forward",
-                        ges = "tap",
-                        screen_zone = is_rtl
-                            and { ratio_x = 0, ratio_y = 0, ratio_w = 0.25, ratio_h = 1 }
-                            or  { ratio_x = 0.75, ratio_y = 0, ratio_w = 0.25, ratio_h = 1 },
-                        handler = function() return imgviewer:onNextPanel() end,
-                    },
-                    {
-                        id = "panel_tap_backward",
-                        ges = "tap",
-                        screen_zone = is_rtl
-                            and { ratio_x = 0.75, ratio_y = 0, ratio_w = 0.25, ratio_h = 1 }
-                            or  { ratio_x = 0, ratio_y = 0, ratio_w = 0.25, ratio_h = 1 },
-                        handler = function() return imgviewer:onPrevPanel() end,
-                    },
-                })
-            end
-        end
-
-        -- Handle device rotation: apply rotation, close viewer, re-show panel
-        imgviewer.onSetRotationMode = function(self_viewer, mode)
-            if mode ~= nil and mode ~= Screen:getRotationMode() then
-                UIManager:close(self_viewer)
-                -- Apply rotation via ReaderView
-                panelnav.view:onSetRotationMode(mode)
-                -- Re-show panel after rotation
-                UIManager:nextTick(function()
-                    local rot_panels = panelnav:getPanelsForCurrentPage()
-                    if rot_panels and panelnav.current_panel_index > 0 then
-                        panelnav:showPanel(rot_panels[panelnav.current_panel_index])
-                    end
-                end)
-            end
-            return true
-        end
-
-        -- Clear reference when ImageViewer is closed, but call original cleanup first
-        local orig_onCloseWidget = imgviewer.onCloseWidget
-        imgviewer.onCloseWidget = function(self_viewer)
-            panelnav._panel_viewer = nil
-            -- Call original cleanup to free resources
-            if orig_onCloseWidget then
-                orig_onCloseWidget(self_viewer)
-            end
-        end
-
-        -- Store reference for reuse
-        self._panel_viewer = imgviewer
-        UIManager:show(imgviewer)
-        logger.dbg("ReaderPanelNav: showing panel", self.current_panel_index)
+    local viewer = self._panel_viewer
+    -- (the view and the footer don't change while the viewer is open)
+    local overlay
+    if viewer then
+        overlay = viewer.overlay
     else
+        overlay = self.panel_view_mode == "overlay"
+    end
+    local footer = self.view.footer
+    local footer_visible = self.view.footer_visible
+    -- the height at the bottom of the screen left to the footer
+    local bottom_height
+    if viewer then
+        bottom_height = overlay and viewer.overlay_bottom_height or viewer.reserved_bottom_height
+    elseif overlay then
+        -- over the page, the footer stays as it is, even if it overlaps the page
+        bottom_height = footer_visible and footer:getHeight() or 0
+    else
+        -- fullscreen, it stays at the bottom of the screen, over the panel if it overlaps the page
+        bottom_height = footer_visible and not footer.settings.reclaim_height and footer:getHeight() or 0
+    end
+    local pageno = self.ui.paging.current_page
+    local image, rotated, panel_rect
+    if overlay then
+        -- its size on the page, enlarged, but no bigger than fits on the screen; not rotated
+        local max_size = PanelViewer.getOverlayMaxSize(bottom_height)
+        if self.panel_overlay_zoom ~= "fit" then
+            local zoom = self.view.state.zoom * self.panel_overlay_zoom
+            max_size.w = math.min(max_size.w, panel.w * zoom)
+            max_size.h = math.min(max_size.h, panel.h * zoom)
+        end
+        image, rotated = self.ui.document:drawPagePart(pageno, panel, 0, false, max_size)
+        -- to frame it on the page
+        panel_rect = self.view:pageToScreenTransform(pageno, panel)
+    else
+        -- render the panel at the size it is shown, so that the viewer doesn't have to scale it again
+        local max_size = { w = Screen:getWidth(), h = Screen:getHeight() - bottom_height }
+        local rotate = self.panel_rotate_wide and self:isWidePanel(panel, max_size)
+        image, rotated = self.ui.document:drawPagePart(pageno, panel, 0, rotate, max_size)
+    end
+    if not image then
         logger.dbg("ReaderPanelNav: drawPagePart returned nil image")
         UIManager:show(InfoMessage:new{
             text = _("Could not render panel."),
             timeout = 2,
         })
+        return
     end
+    -- The viewer frees the image it is given: a copy, as the tile is the document cache's, which may
+    -- drop and free it while it is shown (e.g., DocCache:memoryPressureCheck() on low memory)
+    image = image:copy()
+    if viewer then
+        viewer:setImage(image, rotated, panel_rect)
+        return
+    end
+
+    local forward_zone, backward_zone = self:getTapZones()
+    self._panel_viewer = PanelViewer:new{
+        image = image,
+        rotated = rotated,
+        overlay = overlay,
+        panel_rect = panel_rect,
+        overlay_bottom_height = overlay and bottom_height or 0,
+        paint_background_callback = overlay and function(bb, x, y)
+            -- the page as the reader shows it, with its footer
+            self.view:paintTo(bb, x, y)
+        end or nil,
+        reserved_bottom_height = not overlay and bottom_height or 0,
+        paint_bottom_callback = not overlay and footer_visible and function(bb, x, y)
+            -- it is up to date: ReaderFooter updates its text on page changes
+            footer:paintTo(bb, x, y)
+        end or nil,
+        forward_zone = forward_zone,
+        backward_zone = backward_zone,
+        inverse_reading_order = self.view.inverse_reading_order,
+        next_callback = function() self:onGotoNextPanel() end,
+        prev_callback = function() self:onGotoPrevPanel() end,
+        close_callback = function() self._panel_viewer = nil end,
+        rotation_callback = function(mode) self:rotateAndShowPanel(mode) end,
+    }
+    UIManager:show(self._panel_viewer)
 end
 
 --[[--
-Show full page (exit panel zoom).
+Show a panel of the current page, or the whole page if it has no panels.
+
+@param index index of the panel, counted from the last one if negative (-1 is the last one)
 --]]
-function ReaderPanelNav:showFullPage()
-    self.current_panel_index = 0
-    self.ui:handleEvent(Event:new("RedrawCurrentPage"))
-end
-
---[[--
-Toggle panel navigation enabled setting (for menu).
---]]
-function ReaderPanelNav:togglePanelNavEnabled()
-    self.panel_nav_enabled = not self.panel_nav_enabled
-
-    if self.panel_nav_enabled then
-        UIManager:show(InfoMessage:new{
-            text = _("Panel navigation enabled."),
-            timeout = 2,
-        })
-    else
-        UIManager:show(InfoMessage:new{
-            text = _("Panel navigation disabled."),
-            timeout = 2,
-        })
-        -- Reset state
-        self.current_panel_index = 0
-        self.current_page_panels = nil
-        self.panels_page = nil
-    end
-end
-
---[[--
-Enter panel navigation mode - show current panel in ImageViewer.
-Navigation keys only work if panel navigation is enabled.
---]]
-function ReaderPanelNav:onEnterPanelNavMode()
-    if self.ui.highlight and not self.ui.highlight.panel_zoom_enabled then
-        UIManager:show(InfoMessage:new{
-            text = _("Panel zoom must be enabled first."),
-            timeout = 2,
-        })
-        return true
-    end
-
-    local panels = self:getPanelsForCurrentPage()
+function ReaderPanelNav:showPanelIndex(index)
+    local pageno = self.ui.paging.current_page
+    local panels = self:getPanelsForPage(pageno)
     if panels then
-        -- no current panel, or one from a previous detection: start at the first one
-        if self.current_panel_index < 1 or self.current_panel_index > #panels then
-            self.current_panel_index = 1
+        if index < 0 then
+            index = #panels + 1 + index
         end
+        self.current_panel_index = math.max(1, math.min(index, #panels))
+        logger.dbg("ReaderPanelNav: showing panel", self.current_panel_index, "of", #panels, "on page", pageno)
         self:showPanel(panels[self.current_panel_index])
     else
-        UIManager:show(InfoMessage:new{
-            text = _("No panels detected on this page."),
-            timeout = 2,
-        })
+        self.current_panel_index = 0
+        logger.dbg("ReaderPanelNav: no panels, showing page", pageno)
+        local page_size = self.ui.document:getNativePageDimensions(pageno)
+        self:showPanel({ x = 0, y = 0, w = page_size.w, h = page_size.h })
     end
+end
 
+--[[--
+Start panel navigation with the panel at a position, as on a long-press.
+
+On a page without panels, navigation starts with the whole page, as it is shown when navigating.
+
+@param pos position {x, y, page} in native page coordinates, as from ReaderView:screenToPageTransform()
+@treturn bool true if a panel contains it (or the page has no panels), and it is shown
+--]]
+function ReaderPanelNav:showPanelAt(pos)
+    if not self.ui.document.getAllPanelsFromPage then
+        return false
+    end
+    local panels = self:getPanelsForPage(pos.page)
+    local index
+    if panels then
+        for i, panel in ipairs(panels) do
+            if pos.x >= panel.x and pos.x <= panel.x + panel.w and
+               pos.y >= panel.y and pos.y <= panel.y + panel.h then
+                index = i
+                break
+            end
+        end
+        if not index then
+            return false
+        end
+    end
+    if pos.page ~= self.ui.paging.current_page then
+        -- in scroll mode: the panel is on the next page shown
+        self.ui:handleEvent(Event:new("GotoPage", pos.page))
+    end
+    self:showPanelIndex(index or 1)
     return true
+end
+
+--[[--
+Go to the next or previous page, and show its first or last panel.
+
+At the end or start of the document, notify and stay on the current panel.
+
+@param direction 1 for the next page, -1 for the previous one
+--]]
+function ReaderPanelNav:turnPage(direction)
+    local pageno = self.ui.paging.current_page
+    local new_pageno
+    if direction > 0 then
+        new_pageno = self.ui.document:getNextPage(pageno)
+    else
+        new_pageno = self.ui.document:getPrevPage(pageno)
+    end
+    if new_pageno == 0 then
+        Notification:notify(direction > 0 and _("This is the last page.") or _("This is the first page."),
+            Notification.SOURCE_ALWAYS_SHOW)
+        return
+    end
+    -- rather than GotoViewRel, which can scroll within the page, or end the document
+    self.ui:handleEvent(Event:new("GotoPage", new_pageno))
+    self:showPanelIndex(direction > 0 and 1 or -1)
+    -- Rendering and detecting the panels of the new page takes a while on slow devices: a tap made
+    -- meanwhile (tapping again, as nothing seems to happen) would skip its first panel. Discard
+    -- them, as ReaderRolling does after a re-rendering.
+    Input:inhibitInputUntil(0.2)
+end
+
+--[[--
+Show the next panel, of the next page after the last one.
+
+Without the viewer, start panel navigation with the first panel of the current page.
+--]]
+function ReaderPanelNav:onGotoNextPanel()
+    if not self._panel_viewer then
+        if not self.ui.document.getAllPanelsFromPage then return end
+        self:showPanelIndex(1)
+        return true
+    end
+    local panels = self:getPanelsForCurrentPage()
+    if panels and self.current_panel_index < #panels then
+        self:showPanelIndex(self.current_panel_index + 1)
+    else
+        self:turnPage(1)
+    end
+    return true
+end
+
+--[[--
+Show the previous panel, of the previous page before the first one.
+
+Without the viewer, start panel navigation with the last panel of the current page.
+--]]
+function ReaderPanelNav:onGotoPrevPanel()
+    if not self._panel_viewer then
+        if not self.ui.document.getAllPanelsFromPage then return end
+        self:showPanelIndex(-1)
+        return true
+    end
+    if self.current_panel_index > 1 then
+        self:showPanelIndex(self.current_panel_index - 1)
+    else
+        self:turnPage(-1)
+    end
+    return true
+end
+
+--[[--
+Start panel navigation, with the last panel shown on the current page if any, or its first one.
+--]]
+function ReaderPanelNav:onEnterPanelNavMode()
+    if not self._panel_viewer then
+        if not self.ui.document.getAllPanelsFromPage then return end
+        -- (detecting the panels again forgets the last one shown)
+        self:getPanelsForCurrentPage()
+        self:showPanelIndex(math.max(self.current_panel_index, 1))
+    end
+    return true
+end
+
+--[[--
+Rotate the screen, as asked from the viewer, which has closed itself: show the panel again.
+
+@param[opt] mode rotation mode, nil when the screen has already been resized (the reader gets the
+SetDimensions event after the viewer)
+--]]
+function ReaderPanelNav:rotateAndShowPanel(mode)
+    if mode then
+        self.view:onSetRotationMode(mode)
+    end
+    UIManager:nextTick(function()
+        self:showPanelIndex(math.max(self.current_panel_index, 1))
+    end)
 end
 
 --[[--
@@ -926,11 +813,11 @@ function ReaderPanelNav:onToggleShowPanelBoxes()
     self.show_panel_boxes = not self.show_panel_boxes
 
     if self.show_panel_boxes then
-        -- Force panel detection on current page
-        self:getPanelsForCurrentPage()
-        local panel_count = self.current_page_panels and #self.current_page_panels or 0
+        local panels = self:getPanelsForCurrentPage()
+        local panel_count = panels and #panels or 0
         UIManager:show(InfoMessage:new{
-            text = _("Panel boxes visible.") .. "\n" .. string.format(_("Detected %d panels on this page."), panel_count),
+            text = _("Panel boxes visible.") .. "\n" ..
+                T(N_("Detected 1 panel on this page.", "Detected %1 panels on this page.", panel_count), panel_count),
             timeout = 2,
         })
     else
@@ -941,7 +828,7 @@ function ReaderPanelNav:onToggleShowPanelBoxes()
     end
 
     -- Redraw the page
-    UIManager:setDirty(self.dialog, "ui")
+    UIManager:setDirty(self.view.dialog, "ui")
     return true
 end
 
@@ -955,24 +842,20 @@ This is called by ReaderView as a registered view module.
 @param y Y offset
 --]]
 function ReaderPanelNav:paintTo(bb, x, y)
-    if not self.show_panel_boxes and not self.highlight_current_panel then
-        return
+    local panels
+    if self.show_panel_boxes then
+        panels = self:getPanelsForCurrentPage()
+    elseif self.highlight_current_panel and self.current_panel_index > 0
+            and self.panels_page == self.ui.paging.current_page then
+        -- not detecting the panels for that: there is a current one only once they are
+        panels = self.current_page_panels
     end
-    if self.ui.highlight and not self.ui.highlight.panel_zoom_enabled then
-        return
-    end
-    if not self.panel_nav_enabled then
-        return
-    end
-
-    local panels = self:getPanelsForCurrentPage()
     if not panels then
         return
     end
 
     local box_color = Blitbuffer.ColorRGB24(0x00, 0xCC, 0x00)  -- green for all the panels
-    local current_box_color = Blitbuffer.ColorRGB24(0xFF, 0x00, 0x00)  -- red for the current one
-    local line_width = Size.line.thick
+    local current_box_color = PanelViewer.getPanelFrameColor()  -- red (black in grayscale) for the current one
     local number_font = Font:getFace("infofont", 14)
 
     for i, panel in ipairs(panels) do
@@ -981,10 +864,8 @@ function ReaderPanelNav:paintTo(bb, x, y)
         -- without show_panel_boxes, only the current panel is highlighted
         if rect and (self.show_panel_boxes or is_current) then
             local color = is_current and current_box_color or box_color
-            bb:paintRectRGB32(rect.x, rect.y, rect.w, line_width, color)
-            bb:paintRectRGB32(rect.x, rect.y + rect.h - line_width, rect.w, line_width, color)
-            bb:paintRectRGB32(rect.x, rect.y, line_width, rect.h, color)
-            bb:paintRectRGB32(rect.x + rect.w - line_width, rect.y, line_width, rect.h, color)
+            -- as the viewer frames the current panel, over the page
+            PanelViewer.paintPanelFrame(bb, rect, color)
 
             -- debug: panel number, in white on the box color
             if self.show_panel_boxes then
@@ -997,21 +878,27 @@ function ReaderPanelNav:paintTo(bb, x, y)
             end
         end
     end
-
-    if self.show_panel_boxes then
-        logger.dbg("ReaderPanelNav: painted", #panels, "panel boxes with numbers")
-    end
 end
 
 --[[--
-Handle page change to reset panel state.
+Forget the panels of the previous page on page change.
 --]]
 function ReaderPanelNav:onPageUpdate(new_page_no)
     if self.panels_page ~= new_page_no then
         self.current_page_panels = nil
         self.panels_page = nil
+        self.panels_direction = nil
         self.current_panel_index = 0
     end
+end
+
+function ReaderPanelNav:onCloseDocument()
+    if self._panel_viewer then
+        UIManager:close(self._panel_viewer)
+    end
+    self.current_page_panels = nil
+    self.panels_page = nil
+    self.panels_direction = nil
 end
 
 return ReaderPanelNav

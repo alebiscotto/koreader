@@ -753,7 +753,8 @@ If you wish your highlights to be saved in the document, just move it to a writa
         })
     end
 
-    if self.ui.paging then
+    -- (not for single images: no panel detection)
+    if self.ui.paging and self.ui.document.getPanelFromPage then
         menu_items.panel_zoom_options = {
             text = _("Panel zoom (manga/comic)"),
             sub_item_table = self:genPanelZoomMenu(),
@@ -940,49 +941,214 @@ function ReaderHighlight:genPanelZoomMenu()
     -- Add panel navigation options if the module is loaded
     if self.ui.panelnav then
         local panelnav = self.ui.panelnav
-        -- Panel reading direction submenu
-        local direction_codes = { "LRTB", "LRBT", "RLTB", "RLBT", "TBLR", "TBRL", "BTLR", "BTRL" }
-        local direction_submenu = {}
-        for _, code in ipairs(direction_codes) do
+        -- The Enter panel navigation action, for the devices without a long-press
+        table.insert(menu, {
+            text = _("Start panel navigation"),
+            help_text = _("Long-press a panel to read panel by panel: tap to go on, hold or swipe down to go back to the page."),
+            enabled_func = function()
+                return self.panel_zoom_enabled
+            end,
+            callback = function()
+                self.ui:handleEvent(Event:new("EnterPanelNavMode"))
+            end,
+            separator = true,
+        })
+        -- How the panels are shown, for the book; hold for newly opened books (star)
+        local view_mode_texts = {
+            overlay = _("Over the page"),
+            fullscreen = _("Fullscreen"),
+        }
+        local function viewModeItem(mode)
+            return {
+                text_func = function()
+                    local text = view_mode_texts[mode]
+                    if panelnav.getDefaultViewMode() == mode then
+                        text = text .. "   ★"
+                    end
+                    return text
+                end,
+                checked_func = function()
+                    return panelnav.panel_view_mode == mode
+                end,
+                radio = true,
+                callback = function()
+                    panelnav.panel_view_mode = mode
+                end,
+                hold_callback = function(touchmenu_instance)
+                    if mode == "overlay" then
+                        G_reader_settings:delSetting("panel_view_mode")
+                    else
+                        G_reader_settings:saveSetting("panel_view_mode", mode)
+                    end
+                    touchmenu_instance:updateItems()
+                end,
+            }
+        end
+        table.insert(menu, {
+            text_func = function()
+                return T(_("Panel view: %1"), view_mode_texts[panelnav.panel_view_mode])
+            end,
+            help_text = _([[
+Over the page: the panel is shown enlarged in the middle of the page, which stays visible around it.
+Fullscreen: the panel is shown alone, as big as the screen allows.]]),
+            sub_item_table = {
+                viewModeItem("overlay"),
+                viewModeItem("fullscreen"),
+            },
+        })
+        local function overlayZoomText(zoom)
+            if zoom == "fit" then
+                return _("Fit screen")
+            end
+            -- @translators A percentage (%1 is the number), with a narrow no-break space before the percent sign.
+            return T(_("%1\xE2\x80\xAF%"), math.floor(zoom * 100 + 0.5))
+        end
+        local function overlayZoomItem(zoom)
+            return {
+                text_func = function()
+                    local text = overlayZoomText(zoom)
+                    if panelnav.getDefaultOverlayZoom() == zoom then
+                        text = text .. "   ★"
+                    end
+                    return text
+                end,
+                checked_func = function()
+                    return panelnav.panel_overlay_zoom == zoom
+                end,
+                radio = true,
+                callback = function()
+                    panelnav.panel_overlay_zoom = zoom
+                end,
+                hold_callback = function(touchmenu_instance)
+                    if zoom == 1.5 then
+                        G_reader_settings:delSetting("panel_overlay_zoom")
+                    else
+                        G_reader_settings:saveSetting("panel_overlay_zoom", zoom)
+                    end
+                    touchmenu_instance:updateItems()
+                end,
+            }
+        end
+        table.insert(menu, {
+            text_func = function()
+                return T(_("Zoom over the page: %1"), overlayZoomText(panelnav.panel_overlay_zoom))
+            end,
+            help_text = _("Set how much bigger than on the page a panel is shown over it, at most as big as fits on the screen."),
+            enabled_func = function()
+                return panelnav.panel_view_mode == "overlay"
+            end,
+            sub_item_table = {
+                overlayZoomItem(1.25),
+                overlayZoomItem(1.5),
+                overlayZoomItem(2),
+                overlayZoomItem("fit"),
+            },
+        })
+        table.insert(menu, {
+            text_func = function()
+                local text = _("Rotate wide panels to fit screen")
+                if G_reader_settings:nilOrTrue("panel_rotate_wide") then
+                    text = text .. "   ★"
+                end
+                return text
+            end,
+            help_text = _("In the fullscreen panel view, rotate the panels that are much wider than tall (or taller than wide on a landscape screen), so that they are shown bigger."),
+            enabled_func = function()
+                return panelnav.panel_view_mode == "fullscreen"
+            end,
+            checked_func = function()
+                return panelnav.panel_rotate_wide
+            end,
+            callback = function()
+                panelnav.panel_rotate_wide = not panelnav.panel_rotate_wide
+            end,
+            hold_callback = function(touchmenu_instance)
+                G_reader_settings:flipNilOrTrue("panel_rotate_wide")
+                touchmenu_instance:updateItems()
+            end,
+            separator = true,
+        })
+        -- Panel reading direction submenu, with a star on the default for newly opened books
+        local direction_submenu = {
+            {
+                text_func = function()
+                    local text = _("Follow page turn direction")
+                    if G_reader_settings:hasNot("panel_direction") then
+                        text = text .. "   ★"
+                    end
+                    return text
+                end,
+                checked_func = function()
+                    return panelnav.panel_direction == nil
+                end,
+                radio = true,
+                callback = function()
+                    panelnav:setPanelDirection(nil)
+                end,
+                hold_callback = function(touchmenu_instance)
+                    G_reader_settings:delSetting("panel_direction")
+                    touchmenu_instance:updateItems()
+                end,
+                separator = true,
+            },
+        }
+        for _, code in ipairs({ "LRTB", "LRBT", "RLTB", "RLBT", "TBLR", "TBRL", "BTLR", "BTRL" }) do
             table.insert(direction_submenu, {
-                text = code .. " – " .. panelnav:getDirectionDescription(code),
-                icon = "direction." .. code,
+                text_func = function()
+                    local text = code .. " – " .. panelnav:getDirectionDescription(code)
+                    if G_reader_settings:readSetting("panel_direction") == code then
+                        text = text .. "   ★"
+                    end
+                    return text
+                end,
                 checked_func = function()
                     return panelnav.panel_direction == code
                 end,
+                radio = true,
                 callback = function()
                     panelnav:setPanelDirection(code)
                 end,
-                hold_callback = function()
+                hold_callback = function(touchmenu_instance)
                     G_reader_settings:saveSetting("panel_direction", code)
+                    touchmenu_instance:updateItems()
                 end,
             })
         end
         table.insert(menu, {
-            text = _("Enable panel navigation"),
-            help_text = _("Navigate through comics/manga panel-by-panel with automatic panel detection. Use the left/right arrow keys or tap the left/right sides of a zoomed panel to move between panels."),
-            checked_func = function()
-                return panelnav.panel_nav_enabled
-            end,
-            callback = function()
-                panelnav:togglePanelNavEnabled()
-            end,
-            hold_callback = function()
-                G_reader_settings:saveSetting("panel_nav_enabled", not G_reader_settings:isTrue("panel_nav_enabled"))
-            end,
-            enabled_func = function()
-                return self.panel_zoom_enabled
-            end,
-        })
-        table.insert(menu, {
             text_func = function()
-                return T(_("Panel reading direction: %1"), panelnav.panel_direction)
+                return T(_("Panel reading direction: %1"), panelnav:getPanelDirection())
             end,
-            help_text = _("Set the reading direction for panel navigation. This determines the order in which panels are numbered and navigated."),
-            enabled_func = function()
-                return self.panel_zoom_enabled and panelnav.panel_nav_enabled
-            end,
+            help_text = _("Set the order in which the panels of a page are shown. By default, it follows the page turn direction: right to left with RTL page turning, left to right otherwise."),
             sub_item_table = direction_submenu,
+        })
+        -- The hand holding the device: a device setting, not a book one
+        local function oneHandItem(text, hand)
+            return {
+                text = text,
+                checked_func = function()
+                    return G_reader_settings:readSetting("panel_nav_one_hand") == hand
+                end,
+                radio = true,
+                callback = function()
+                    if hand then
+                        G_reader_settings:saveSetting("panel_nav_one_hand", hand)
+                    else
+                        G_reader_settings:delSetting("panel_nav_one_hand")
+                    end
+                end,
+            }
+        end
+        table.insert(menu, {
+            text = _("One-handed navigation"),
+            help_text = _("Go to the next panel with a tap anywhere except a strip on the side of the hand holding the device, which goes back."),
+            checked_func = function()
+                return G_reader_settings:has("panel_nav_one_hand")
+            end,
+            sub_item_table = {
+                oneHandItem(_("Off"), nil),
+                oneHandItem(_("Left hand"), "left"),
+                oneHandItem(_("Right hand"), "right"),
+            },
         })
         table.insert(menu, {
             text = _("Highlight current panel"),
@@ -994,21 +1160,15 @@ function ReaderHighlight:genPanelZoomMenu()
                 panelnav.highlight_current_panel = not panelnav.highlight_current_panel
                 UIManager:setDirty(panelnav.dialog, "ui")
             end,
-            enabled_func = function()
-                return self.panel_zoom_enabled and panelnav.panel_nav_enabled
-            end,
         })
         table.insert(menu, {
             text = _("Show all detected panel boxes (debug)"),
-            help_text = _("Debug option: show green bounding boxes around all detected panels on the current page with panel numbers and coordinates. The current panel is shown in red."),
+            help_text = _("Debug option: show green bounding boxes around all detected panels on the current page, with their numbers. The current panel is shown in red."),
             checked_func = function()
                 return panelnav.show_panel_boxes
             end,
             callback = function()
                 panelnav:onToggleShowPanelBoxes()
-            end,
-            enabled_func = function()
-                return self.panel_zoom_enabled and panelnav.panel_nav_enabled
             end,
         })
     end
@@ -1751,40 +1911,24 @@ function ReaderHighlight:onToggleFallbackTextSelection(arg, ges)
 end
 
 function ReaderHighlight:onPanelZoom(arg, ges)
+    if not self.ui.document.getPanelFromPage then return false end -- single images
     self:clear()
     local hold_pos = self.view:screenToPageTransform(ges.pos)
     if not hold_pos then return false end -- outside page boundary
-    local rect = self.ui.document:getPanelFromPage(hold_pos.page, hold_pos)
-    if not rect then return false end -- panel not found, return
-
-    if self.ui.panelnav and self.ui.panelnav.panel_nav_enabled then
-        local panelnav = self.ui.panelnav
-        -- navigation starts from the panel at the hold position
-        local panels = panelnav:getPanelsForCurrentPage()
-        if panels then
-            local found_index = 0
-            for i, panel in ipairs(panels) do
-                if hold_pos.x >= panel.x and hold_pos.x <= panel.x + panel.w and
-                   hold_pos.y >= panel.y and hold_pos.y <= panel.y + panel.h then
-                    found_index = i
-                    break
-                end
-            end
-            panelnav.current_panel_index = found_index > 0 and found_index or 1
-        else
-            panelnav.current_panel_index = 1
-        end
-        panelnav:showPanel(rect)
+    -- navigate from the panel at the hold position
+    if self.ui.panelnav and self.ui.panelnav:showPanelAt(hold_pos) then
         return true
     end
-
+    -- or show the panel found there alone
+    local rect = self.ui.document:getPanelFromPage(hold_pos.page, hold_pos)
+    if not rect then return false end -- panel not found, return
     local image, rotate = self.ui.document:drawPagePart(hold_pos.page, rect, 0)
 
     if image then
         local ImageViewer = require("ui/widget/imageviewer")
         local imgviewer = ImageViewer:new{
-            image = image,
-            image_disposable = false, -- It's a TileCache item
+            image = image:copy(), -- the TileCache item may be freed while shown, e.g., on low memory
+            image_disposable = true,
             with_title_bar = false,
             fullscreen = true,
             rotated = rotate,
@@ -1796,7 +1940,7 @@ function ReaderHighlight:onPanelZoom(arg, ges)
 end
 
 function ReaderHighlight:onHold(arg, ges)
-    if self.ui.paging and self.panel_zoom_enabled then
+    if self.ui.paging and self.panel_zoom_enabled and self.ui.document.getPanelFromPage then
         local res = self:onPanelZoom(arg, ges)
         if res or not self.panel_zoom_fallback_to_text_selection then
             return res

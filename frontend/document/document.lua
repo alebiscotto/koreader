@@ -570,15 +570,31 @@ function Document:getDrawnImagesStatistics()
     return self._drawn_images_count, self._drawn_images_surface_ratio
 end
 
-function Document:drawPagePart(pageno, native_rect, rotation)
+--[[--
+Render a part of a page, scaled to fit the screen, or the size it is to be shown at.
+
+@param pageno page number
+@param native_rect part of the page {x, y, w, h}, in native page coordinates
+@param rotation page rotation
+@param rotate_for_best_fit whether to rotate it when its orientation differs from that of the size
+to fit, to fit it bigger (nil: as set for ImageViewer, with imageviewer_rotate_auto_for_best_fit)
+@param max_size size {w, h} to fit it into (default: the screen, CanvasContext:getSize()):
+it is rendered at the size it will be shown, so that it is not scaled again
+@treturn BlitBuffer the rendered part, a tile cache item that must not be freed
+@treturn bool whether it is to be shown rotated
+--]]
+function Document:drawPagePart(pageno, native_rect, rotation, rotate_for_best_fit, max_size)
     -- native_rect is straight from base, so not a Geom
     local rect = Geom:new(native_rect)
 
-    local canvas_size = CanvasContext:getSize()
+    local canvas_size = max_size or CanvasContext:getSize()
     -- Compute a zoom in order to scale to best fit, so that ImageViewer doesn't have to rescale further.
     -- Optionally, based on ImageViewer settings, we'll auto-rotate for the best resolution.
+    if rotate_for_best_fit == nil then
+        rotate_for_best_fit = G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit")
+    end
     local rotate = false
-    if G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit") then
+    if rotate_for_best_fit then
         rotate = (canvas_size.w > canvas_size.h) ~= (rect.w > rect.h)
     end
     local zoom = rotate and math.min(canvas_size.w / rect.h, canvas_size.h / rect.w) or math.min(canvas_size.w / rect.w, canvas_size.h / rect.h)
