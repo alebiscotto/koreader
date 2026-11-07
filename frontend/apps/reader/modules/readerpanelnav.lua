@@ -17,6 +17,7 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local RenderText = require("ui/rendertext")
 local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
+local dbg = require("dbg")
 local logger = require("logger")
 local optionsutil = require("ui/data/optionsutil")
 local _ = require("gettext")
@@ -634,9 +635,7 @@ Show a specific panel in the ImageViewer.
 @param panel panel rectangle {x, y, w, h}
 --]]
 function ReaderPanelNav:showPanel(panel)
-    local dbg = require("dbg")
     dbg.dassert(panel, "showPanel called with nil panel")
-    if not panel then return end
 
     logger.dbg("ReaderPanelNav: showPanel called with panel:", panel)
 
