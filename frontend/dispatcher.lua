@@ -257,7 +257,10 @@ local settingsList = {
     zoom = {category="string", event="SetZoomMode", title=_("Zoom mode"), args_func=ReaderZooming.getZoomModeActions, paging=true},
     zoom_factor_change = {category="none", event="ZoomFactorChange", title=_("Change zoom factor"), paging=true, separator=true},
     ----
-    panel_zoom_toggle = {category="none", event="TogglePanelZoomSetting", title=_("Toggle panel zoom"), paging=true, separator=true},
+    panel_zoom_toggle = {category="none", event="TogglePanelZoomSetting", title=_("Toggle panel zoom"), paging=true},
+    panel_nav_enter = {category="none", event="EnterPanelNavMode", title=_("Enter panel navigation"), paging=true},
+    panel_nav_next = {category="none", event="GotoNextPanel", title=_("Next panel"), paging=true},
+    panel_nav_prev = {category="none", event="GotoPrevPanel", title=_("Previous panel"), paging=true, separator=true},
     ----
 
     -- parsed from CreOptions
@@ -548,6 +551,9 @@ local dispatcher_menu_order = {
     "zoom_factor_change",
     ----
     "panel_zoom_toggle",
+    "panel_nav_enter",
+    "panel_nav_next",
+    "panel_nav_prev",
     ----
     "kopt_trim_page",
     "kopt_page_margin",

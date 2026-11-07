@@ -24,7 +24,6 @@ shown whole, see KOPTContext:getAllPanelsFromPage().
 local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
-local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
 local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
@@ -74,17 +73,7 @@ local ReaderPanelNav = WidgetContainer:extend{
     },
 }
 
-function ReaderPanelNav:onDispatcherRegisterActions()
-    Dispatcher:registerAction("goto_next_panel",
-        {category="none", event="GotoNextPanel", title=_("Go to next panel"), paging=true})
-    Dispatcher:registerAction("goto_prev_panel",
-        {category="none", event="GotoPrevPanel", title=_("Go to previous panel"), paging=true})
-    Dispatcher:registerAction("enter_panel_nav_mode",
-        {category="none", event="EnterPanelNavMode", title=_("Enter panel navigation mode"), paging=true})
-end
-
 function ReaderPanelNav:init()
-    self:onDispatcherRegisterActions()
     -- to draw the panel boxes
     self.view:registerViewModule("panel_nav", self)
 end
