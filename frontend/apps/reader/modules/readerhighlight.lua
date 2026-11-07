@@ -945,7 +945,7 @@ function ReaderHighlight:genPanelZoomMenu()
         local direction_submenu = {}
         for _, code in ipairs(direction_codes) do
             table.insert(direction_submenu, {
-                text = code .. " - " .. panelnav:getDirectionDescription(code),
+                text = code .. " – " .. panelnav:getDirectionDescription(code),
                 icon = "direction." .. code,
                 checked_func = function()
                     return panelnav.panel_direction == code
@@ -961,7 +961,7 @@ function ReaderHighlight:genPanelZoomMenu()
         -- Add panel navigation options at top level
         table.insert(menu, {
             text = _("Enable panel navigation"),
-            help_text = _("Navigate panel-by-panel through comics/manga using automatic panel detection. Use Left/Right arrow keys or tap left/right sides of zoomed panel to move between panels."),
+            help_text = _("Navigate through comics/manga panel-by-panel with automatic panel detection. Use the left/right arrow keys or tap the left/right sides of a zoomed panel to move between panels."),
             checked_func = function()
                 return panelnav.panel_nav_enabled
             end,
@@ -977,7 +977,7 @@ function ReaderHighlight:genPanelZoomMenu()
         })
         table.insert(menu, {
             text_func = function()
-                return _("Panel reading direction") .. ": " .. panelnav.panel_direction
+                return T(_("Panel reading direction: %1"), panelnav.panel_direction)
             end,
             help_text = _("Set the reading direction for panel navigation. This determines the order in which panels are numbered and navigated."),
             enabled_func = function()
@@ -1000,8 +1000,8 @@ function ReaderHighlight:genPanelZoomMenu()
             end,
         })
         table.insert(menu, {
-            text = _("Show all detected panel boxes") .. " (" .. _("debug") .. ")",
-            help_text = _("Debug option: show green bounding boxes around all detected panels on the current page with panel numbers and coordinates. Current panel is shown in red."),
+            text = _("Show all detected panel boxes (debug)"),
+            help_text = _("Debug option: show green bounding boxes around all detected panels on the current page with panel numbers and coordinates. The current panel is shown in red."),
             checked_func = function()
                 return panelnav.show_panel_boxes
             end,
