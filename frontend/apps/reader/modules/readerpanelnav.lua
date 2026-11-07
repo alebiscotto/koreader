@@ -250,10 +250,10 @@ Transforms all coordinates to LRTB-equivalent, sorts using sortLRTB,
 then maps back to original panels with row/col assigned.
 
 @param panels array of panel rectangles {x, y, w, h}
-@treturn table sorted array of panels with row/col fields added
+@treturn table sorted array of panels with row/col fields added, or nil if no panels
 --]]
 function ReaderPanelNav:sortPanelsByReadingDirection(panels)
-    if not panels or #panels == 0 then return panels end
+    if not panels or #panels == 0 then return end
 
     local direction = self.panel_direction or "LRTB"
     local primary, secondary = direction:sub(1, 2), direction:sub(3, 4)
@@ -320,10 +320,13 @@ Filter out panels that are completely contained within other panels.
 Keeps only the outermost panels.
 
 @param panels array of panel rectangles {x, y, w, h}
-@treturn table filtered array of panels
+@treturn table filtered array of panels, or nil if no panels
 --]]
 function ReaderPanelNav:filterNestedPanels(panels)
-    if not panels or #panels <= 1 then
+    if not panels or #panels == 0 then
+        return
+    end
+    if #panels == 1 then
         return panels
     end
 
@@ -407,10 +410,13 @@ they are merged into their bounding box.
 
 @param panels array of panel rectangles {x, y, w, h}
 @param overlap_threshold fraction of overlap required to merge (default 0.3 = 30%)
-@treturn table array of merged panels
+@treturn table array of merged panels, or nil if no panels
 --]]
 function ReaderPanelNav:mergeOverlappingPanels(panels, overlap_threshold)
-    if not panels or #panels <= 1 then
+    if not panels or #panels == 0 then
+        return
+    end
+    if #panels == 1 then
         return panels
     end
 
@@ -504,8 +510,9 @@ function ReaderPanelNav:clipPanelsToPage(panels, page_width, page_height)
     if removed > 0 then
         logger.dbg("ReaderPanelNav: clipped/removed", removed, "panels outside page bounds")
     end
-
-    return clipped
+    if #clipped > 0 then
+        return clipped
+    end
 end
 
 --[[--
@@ -526,47 +533,23 @@ function ReaderPanelNav:getPanelsForCurrentPage()
         return self.current_page_panels
     end
 
-    -- Get panels from document
     local panels = self.ui.document:getAllPanelsFromPage(pageno)
-    if not panels or #panels == 0 then
-        self.current_page_panels = nil
-        self.panels_page = pageno
-        return nil
-    end
-
-    -- Clip panels to page boundaries
-    local page_size = self.ui.document:getNativePageDimensions(pageno)
-    if page_size then
-        panels = self:clipPanelsToPage(panels, page_size.w, page_size.h)
-        if not panels or #panels == 0 then
-            self.current_page_panels = nil
-            self.panels_page = pageno
-            return nil
+    if panels then
+        local page_size = self.ui.document:getNativePageDimensions(pageno)
+        if page_size then
+            panels = self:clipPanelsToPage(panels, page_size.w, page_size.h)
         end
     end
-
-    -- Merge overlapping panels (50% overlap threshold)
-    panels = self:mergeOverlappingPanels(panels, 0.5)
-    if not panels or #panels == 0 then
-        self.current_page_panels = nil
-        self.panels_page = pageno
-        return nil
+    -- merging and filtering never leave a page without panels
+    if panels then
+        panels = self:mergeOverlappingPanels(panels, 0.5)
+        panels = self:filterNestedPanels(panels)
+        panels = self:sortPanelsByReadingDirection(panels)
+        self.current_panel_index = 0 -- full page view
     end
-
-    -- Filter out nested panels (keep only outermost ones)
-    panels = self:filterNestedPanels(panels)
-    if not panels or #panels == 0 then
-        self.current_page_panels = nil
-        self.panels_page = pageno
-        return nil
-    end
-
-    -- Sort panels by reading direction
-    self.current_page_panels = self:sortPanelsByReadingDirection(panels)
+    self.current_page_panels = panels
     self.panels_page = pageno
-    self.current_panel_index = 0  -- Reset to full page view
-
-    return self.current_page_panels
+    return panels
 end
 
 --[[--
@@ -584,7 +567,7 @@ function ReaderPanelNav:onGotoNextPanel()
     local panels = self:getPanelsForCurrentPage()
     logger.dbg("ReaderPanelNav: panels count:", panels and #panels or 0, "current index:", self.current_panel_index)
 
-    if not panels or #panels == 0 then
+    if not panels then
         -- No panels on this page, go to next page
         logger.dbg("ReaderPanelNav: no panels, going to next page")
         self.ui:handleEvent(Event:new("GotoViewRel", 1))
@@ -635,7 +618,7 @@ function ReaderPanelNav:onGotoPrevPanel()
         self.ui:handleEvent(Event:new("GotoViewRel", -1))
         UIManager:nextTick(function()
             local new_panels = self:getPanelsForCurrentPage()
-            if new_panels and #new_panels > 0 then
+            if new_panels then
                 self.current_panel_index = #new_panels
                 self:showPanel(new_panels[self.current_panel_index])
             end
@@ -767,7 +750,7 @@ function ReaderPanelNav:showPanel(panel)
                     UIManager:nextTick(function()
                         panelnav.ui:handleEvent(Event:new("GotoViewRel", 1))
                         local new_panels = panelnav:getPanelsForCurrentPage()
-                        if new_panels and #new_panels > 0 then
+                        if new_panels then
                             panelnav.current_panel_index = 1
                             panelnav:showPanel(new_panels[1])
                         else
@@ -793,7 +776,7 @@ function ReaderPanelNav:showPanel(panel)
                     UIManager:nextTick(function()
                         panelnav.ui:handleEvent(Event:new("GotoViewRel", -1))
                         local new_panels = panelnav:getPanelsForCurrentPage()
-                        if new_panels and #new_panels > 0 then
+                        if new_panels then
                             panelnav.current_panel_index = #new_panels
                             panelnav:showPanel(new_panels[panelnav.current_panel_index])
                         else
@@ -866,7 +849,7 @@ function ReaderPanelNav:showPanel(panel)
         -- Store reference for reuse
         self._panel_viewer = imgviewer
         UIManager:show(imgviewer)
-        logger.dbg("ReaderPanelNav: showing panel", self.current_panel_index, "of", #self.current_page_panels)
+        logger.dbg("ReaderPanelNav: showing panel", self.current_panel_index)
     else
         logger.dbg("ReaderPanelNav: drawPagePart returned nil image")
         UIManager:show(InfoMessage:new{
@@ -921,7 +904,7 @@ function ReaderPanelNav:onEnterPanelNavMode()
     end
 
     local panels = self:getPanelsForCurrentPage()
-    if panels and #panels > 0 then
+    if panels then
         -- no current panel, or one from a previous detection: start at the first one
         if self.current_panel_index < 1 or self.current_panel_index > #panels then
             self.current_panel_index = 1
@@ -984,7 +967,7 @@ function ReaderPanelNav:paintTo(bb, x, y)
     end
 
     local panels = self:getPanelsForCurrentPage()
-    if not panels or #panels == 0 then
+    if not panels then
         return
     end
 

@@ -1761,7 +1761,7 @@ function ReaderHighlight:onPanelZoom(arg, ges)
         local panelnav = self.ui.panelnav
         -- navigation starts from the panel at the hold position
         local panels = panelnav:getPanelsForCurrentPage()
-        if panels and #panels > 0 then
+        if panels then
             local found_index = 0
             for i, panel in ipairs(panels) do
                 if hold_pos.x >= panel.x and hold_pos.x <= panel.x + panel.w and

@@ -149,10 +149,10 @@ describe("ReaderPanelNav module", function()
             end)
         end)
 
-        it("should handle empty panels array", function()
+        it("should return nil for empty panels array", function()
             local panels = {}
             local sorted = panelnav:sortPanelsByReadingDirection(panels)
-            assert.are.equal(0, #sorted)
+            assert.is_nil(sorted)
         end)
 
         it("should handle nil panels", function()
@@ -270,9 +270,9 @@ describe("ReaderPanelNav module", function()
             assert.are.equal(500, filtered[1].w)  -- only outermost remains
         end)
 
-        it("should handle empty panels array", function()
+        it("should return nil for empty panels array", function()
             local filtered = panelnav:filterNestedPanels({})
-            assert.are.equal(0, #filtered)
+            assert.is_nil(filtered)
         end)
 
         it("should handle nil panels", function()
@@ -355,9 +355,9 @@ describe("ReaderPanelNav module", function()
             assert.are.equal(160, merged[1].h)
         end)
 
-        it("should handle empty panels array", function()
+        it("should return nil for empty panels array", function()
             local merged = panelnav:mergeOverlappingPanels({}, 0.5)
-            assert.are.equal(0, #merged)
+            assert.is_nil(merged)
         end)
 
         it("should handle nil panels", function()
@@ -415,9 +415,19 @@ describe("ReaderPanelNav module", function()
         it("should remove panel completely outside page bounds", function()
             local panels = {
                 { x = -200, y = -200, w = 100, h = 100 },  -- completely outside
+                { x = 100, y = 100, w = 200, h = 200 },
             }
             local clipped = panelnav:clipPanelsToPage(panels, 500, 500)
-            assert.are.equal(0, #clipped)
+            assert.are.equal(1, #clipped)
+            assert.are.equal(100, clipped[1].x)
+        end)
+
+        it("should return nil when all panels are outside page bounds", function()
+            local panels = {
+                { x = -200, y = -200, w = 100, h = 100 },  -- completely outside
+            }
+            local clipped = panelnav:clipPanelsToPage(panels, 500, 500)
+            assert.is_nil(clipped)
         end)
 
         it("should not modify panel within page bounds", function()
@@ -432,7 +442,7 @@ describe("ReaderPanelNav module", function()
             assert.are.equal(200, clipped[1].h)
         end)
 
-        it("should handle empty panels array", function()
+        it("should return nil for empty panels array", function()
             local clipped = panelnav:clipPanelsToPage({}, 500, 500)
             assert.is_nil(clipped)
         end)
@@ -440,6 +450,55 @@ describe("ReaderPanelNav module", function()
         it("should handle nil panels", function()
             local clipped = panelnav:clipPanelsToPage(nil, 500, 500)
             assert.is_nil(clipped)
+        end)
+    end)
+
+    describe("getPanelsForCurrentPage", function()
+        local panelnav
+        local detections
+
+        before_each(function()
+            detections = 0
+            panelnav = ReaderPanelNav:new{
+                ui = {
+                    document = {
+                        getAllPanelsFromPage = function(_, pageno)
+                            detections = detections + 1
+                            if pageno == 1 then
+                                return {
+                                    { x = 300, y = 100, w = 200, h = 150 },
+                                    { x = 50, y = 100, w = 200, h = 150 },
+                                    { x = 60, y = 110, w = 50, h = 50 },     -- nested
+                                    { x = 600, y = 100, w = 100, h = 100 },  -- outside the page
+                                }
+                            end
+                        end,
+                        getNativePageDimensions = function()
+                            return { w = 550, h = 800 }
+                        end,
+                    },
+                    paging = { current_page = 1 },
+                    highlight = { panel_zoom_enabled = true },
+                },
+                view = {
+                    registerViewModule = function() end,
+                },
+            }
+        end)
+
+        it("should return the clipped, filtered and sorted panels, and cache them", function()
+            local panels = panelnav:getPanelsForCurrentPage()
+            assert.are.equal(2, #panels)
+            assert.are.equal(50, panels[1].x)
+            assert.are.equal(300, panels[2].x)
+            assert.are.equal(panels, panelnav:getPanelsForCurrentPage())
+            assert.are.equal(1, detections)
+        end)
+
+        it("should return nil for a page without panels", function()
+            panelnav.ui.paging.current_page = 2
+            assert.is_nil(panelnav:getPanelsForCurrentPage())
+            assert.are.equal(2, panelnav.panels_page)
         end)
     end)
 
