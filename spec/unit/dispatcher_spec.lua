@@ -108,6 +108,20 @@ describe("Dispatcher runtime actions", function()
         Device.canKeyRepeat = orig_repeat
     end)
 
+    it("should have the panel navigation actions for fixed layout documents", function()
+        local events = {
+            panel_nav_enter = "EnterPanelNavMode",
+            panel_nav_next = "GotoNextPanel",
+            panel_nav_prev = "GotoPrevPanel",
+        }
+        for name, event in pairs(events) do
+            assert.equals(event, settingsList[name].event)
+            assert.equals("none", settingsList[name].category)
+            assert.is_true(settingsList[name].paging)
+            assert.is_truthy(isAvailable(settingsList[name]))
+        end
+    end)
+
     it("should fall back to the static condition for actions without condition_func", function()
         assert.equals(settingsList.toc.condition ~= false, isAvailable(settingsList.toc))
     end)

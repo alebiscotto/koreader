@@ -169,4 +169,79 @@ describe("Koptinterface module", function()
 
     end)
 
+    describe("panel detection", function()
+        local Archiver, Blitbuffer, DataStorage
+        local doc
+        -- two framed panels on a 1600 x 2400 px page, that MuPDF opens at 96 dpi: 1200 x 1800 native
+        local panels_px = { { 80, 80, 1440, 1080 }, { 80, 1240, 1440, 1080 } }
+        local scale = 0.75
+
+        setup(function()
+            Archiver = require("ffi/archiver")
+            Blitbuffer = require("ffi/blitbuffer")
+            DataStorage = require("datastorage")
+            local page = Blitbuffer.new(1600, 2400, Blitbuffer.TYPE_BB8)
+            page:fill(Blitbuffer.COLOR_WHITE)
+            for _, p in ipairs(panels_px) do
+                page:paintBorder(p[1], p[2], p[3], p[4], 4, Blitbuffer.COLOR_BLACK)
+                for i = 1, 6 do
+                    page:paintRect(p[1] + math.floor(p[3] * i / 8), p[2] + 200, 3, p[4] - 400, Blitbuffer.COLOR_BLACK)
+                end
+            end
+            local png = DataStorage:getDataDir() .. "/panels.png"
+            page:writePNG(png)
+            page:free()
+            local f = io.open(png, "rb")
+            local content = f:read("*a")
+            f:close()
+            os.remove(png)
+            -- a page with panels, then an empty one
+            local blank = Blitbuffer.new(160, 240, Blitbuffer.TYPE_BB8)
+            blank:fill(Blitbuffer.COLOR_WHITE)
+            blank:writePNG(png)
+            blank:free()
+            f = io.open(png, "rb")
+            local blank_content = f:read("*a")
+            f:close()
+            os.remove(png)
+            local cbz = DataStorage:getDataDir() .. "/panels.cbz"
+            local writer = Archiver.Writer:new{}
+            assert.is_true(writer:open(cbz, "zip"))
+            writer:addFileFromMemory("1.png", content)
+            writer:addFileFromMemory("2.png", blank_content)
+            writer:close()
+            doc = DocumentRegistry:openDocument(cbz)
+        end)
+
+        teardown(function()
+            doc:close()
+        end)
+
+        it("should render the page at about a million pixels", function()
+            local size = doc:getNativePageDimensions(1)
+            assert.are.equal(1600 * scale, size.w)
+            local kc, zoom = Koptinterface:getPanelDetectionContext(doc, 1)
+            assert.is_true(math.abs(kc.src.width - size.w * zoom) <= 1)
+            assert.is_true(math.abs(kc.src.width * kc.src.height - 1000000) < 10000)
+            kc:free()
+        end)
+
+        it("should give the panels in native page coordinates", function()
+            local panels = doc:getAllPanelsFromPage(1)
+            assert.are.equal(2, #panels)
+            table.sort(panels, function(a, b) return a.y < b.y end)
+            for i, p in ipairs(panels_px) do
+                local panel = panels[i]
+                assert.is_true(math.abs(panel.x - p[1] * scale) <= 6 and math.abs(panel.y - p[2] * scale) <= 6
+                    and math.abs(panel.w - p[3] * scale) <= 10 and math.abs(panel.h - p[4] * scale) <= 10,
+                    string.format("panel %d: %.0f,%.0f %.0fx%.0f", i, panel.x, panel.y, panel.w, panel.h))
+            end
+            local panel = doc:getPanelFromPage(1, { x = 800 * scale, y = 1800 * scale })
+            assert.is_true(math.abs(panel.y - 1240 * scale) <= 6)
+            assert.is_nil(doc:getPanelFromPage(1, { x = 800 * scale, y = 1200 * scale }))
+            -- a page without panels has none
+            assert.is_nil(doc:getAllPanelsFromPage(2))
+        end)
+    end)
+
 end)

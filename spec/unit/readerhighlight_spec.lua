@@ -342,4 +342,70 @@ describe("Readerhighlight module", function()
         end)
     end)
 
+    describe("panel zoom", function()
+        it("should show a copy of the panel tile, which the document cache may free meanwhile", function()
+            local Blitbuffer = require("ffi/blitbuffer")
+            local ReaderHighlight = require("apps/reader/modules/readerhighlight")
+            local tile = Blitbuffer.new(100, 150, Blitbuffer.TYPE_BBRGB32)
+            tile:setPixel(0, 0, Blitbuffer.COLOR_WHITE)
+            local highlight = ReaderHighlight:extend{
+                ui = {
+                    document = {
+                        getPanelFromPage = function() return { x = 10, y = 20, w = 100, h = 150 } end,
+                        drawPagePart = function() return tile, false end,
+                    },
+                },
+                view = {
+                    screenToPageTransform = function(_, pos) return { x = pos.x, y = pos.y, page = 1 } end,
+                },
+                clear = function() end,
+            }
+            local viewer
+            stub(UIManager, "show", function(_, widget) viewer = widget end)
+            local ok, err = pcall(function()
+                assert.is_true(highlight:onPanelZoom(nil, { pos = { x = 50, y = 60 } }))
+                local image = viewer.image
+                assert.are_not.equal(tile, image)
+                assert.is_true(viewer.image_disposable)
+                -- the cache drops the tile (TileCacheItem:onFree()): the copy stays
+                tile:free()
+                assert.are.equal(1, image:getAllocated())
+                assert.are.equal(100, image:getWidth())
+                assert.are.equal(0xFF, image:getPixel(0, 0):getColorRGB32().r)
+                -- and the viewer frees it when it closes
+                UIManager:close(viewer)
+                assert.are.equal(0, image:getAllocated())
+            end)
+            UIManager.show:revert()
+            assert.is_true(ok, err)
+        end)
+        it("should not be offered for single images, which have no panel detection", function()
+            local image = DataStorage:getDataDir() .. "/readerhighlight.png"
+            require("ffi/util").copyFile("resources/koreader.png", image)
+            -- (opened with PicDocument, as GIF and WebP images are, and other images with "Open with")
+            local ui = ReaderUI:new{
+                dimen = Screen:getSize(),
+                document = DocumentRegistry:openDocument(image, require("document/picdocument")),
+            }
+            local ok, err = pcall(function()
+                assert.is_not_nil(ui.paging)
+                assert.is_nil(ui.document.getPanelFromPage)
+                local menu_items = {}
+                ui.highlight:addToMainMenu(menu_items)
+                assert.is_nil(menu_items.panel_zoom_options)
+                -- even if it was allowed (it is by default for comic book archives only)
+                ui.highlight.panel_zoom_enabled = true
+                local panel_zoom = spy.on(ui.highlight, "onPanelZoom")
+                ui.highlight:onHold(nil, { pos = Geom:new{ x = 100, y = 100 } })
+                ui.highlight:onHoldRelease()
+                assert.spy(panel_zoom).was_not_called()
+                ui.highlight.onPanelZoom:revert()
+                assert.is_false(ui.highlight:onPanelZoom(nil, { pos = Geom:new{ x = 100, y = 100 } }))
+            end)
+            ui.highlight:clear()
+            ui:onClose()
+            assert.is_true(ok, err)
+        end)
+    end)
+
 end)
