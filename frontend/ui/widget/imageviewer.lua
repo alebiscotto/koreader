@@ -47,6 +47,9 @@ local ImageViewer = InputContainer:extend{
     images_keep_pan_and_zoom = true,
 
     fullscreen = false, -- false will add some padding around widget (so footer can be visible)
+    -- Height at the bottom of the screen that we leave to what is under us (e.g., the reader footer):
+    -- our widgets are laid out above it, and we don't paint there
+    reserved_bottom_height = 0,
     with_title_bar = true,
     title_text = _("Viewing image"), -- default title text
     -- A caption can be toggled with tap on title_text (so, it needs with_title_bar=true):
@@ -136,7 +139,7 @@ function ImageViewer:init()
             MultiSwipe = { GestureRange:new{ ges = "multiswipe", range = range } },
         }
     end
-    if self.fullscreen then
+    if self.fullscreen and self.reserved_bottom_height == 0 then
         self.covers_fullscreen = true -- hint for UIManager:_repaint()
     end
 
@@ -161,8 +164,11 @@ function ImageViewer:init()
         self.image = self._scaled_image_func(1) -- native image size, that we need to know
     end
 
+    -- Height of the screen we lay out our widgets in
+    local screen_h = Screen:getHeight() - self.reserved_bottom_height
+
     if self.image and G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit") then
-        self.rotated = (Screen:getWidth() > Screen:getHeight()) ~= (self.image:getWidth() > self.image:getHeight())
+        self.rotated = (Screen:getWidth() > screen_h) ~= (self.image:getWidth() > self.image:getHeight())
     end
 
     -- Widget layout
@@ -173,13 +179,13 @@ function ImageViewer:init()
     self.region = Geom:new{
         x = 0, y = 0,
         w = Screen:getWidth(),
-        h = Screen:getHeight(),
+        h = screen_h,
     }
     if self.fullscreen then
-        self.height = Screen:getHeight()
+        self.height = screen_h
         self.width = Screen:getWidth()
     else
-        self.height = Screen:getHeight() - Screen:scaleBySize(40)
+        self.height = screen_h - Screen:scaleBySize(40)
         self.width = Screen:getWidth() - Screen:scaleBySize(40)
     end
 
@@ -327,11 +333,12 @@ function ImageViewer:update()
     -- Update window geometry (fullscreen can be toggled, but without any title
     -- and buttons, which allow us to not have to update their width)
     local orig_dimen = self.main_frame.dimen
+    local screen_h = Screen:getHeight() - self.reserved_bottom_height
     if self.fullscreen then
-        self.height = Screen:getHeight()
+        self.height = screen_h
         self.width = Screen:getWidth()
     else
-        self.height = Screen:getHeight() - Screen:scaleBySize(40)
+        self.height = screen_h - Screen:scaleBySize(40)
         self.width = Screen:getWidth() - Screen:scaleBySize(40)
     end
 
@@ -372,6 +379,10 @@ function ImageViewer:update()
     self.frame_elements:resetLayout()
 
     self.main_frame.radius = not self.fullscreen and 8 or nil
+    if self.reserved_bottom_height > 0 then
+        -- Fullscreen, our border would be over the reserved height (otherwise, it is off screen)
+        self.main_frame.bordersize = self.fullscreen and 0 or Size.border.window
+    end
 
     -- NOTE: We use UI instead of partial, because we do NOT want to end up using a REAGL waveform...
     --       ...except on Kaleido panels ;).
@@ -766,7 +777,7 @@ function ImageViewer:onSpread(_, ges)
     -- We get the position where spread was done
     -- First, get center ratio we would have had if we did a pan to there,
     -- so we can have the zoom centered on there
-    self._center_x_ratio, self._center_y_ratio = self._image_wg:getPanByCenterRatio(ges.pos.x - Screen:getWidth()/2, ges.pos.y - Screen:getHeight()/2)
+    self._center_x_ratio, self._center_y_ratio = self._image_wg:getPanByCenterRatio(ges.pos.x - Screen:getWidth()/2, ges.pos.y - (Screen:getHeight() - self.reserved_bottom_height)/2)
     -- We compute a scaling percentage (which will *modify* the current scaling factor),
     -- based on the gesture distance (it's the sum of the travel of both fingers).
     -- Making this distance relative to the smallest dimension between
