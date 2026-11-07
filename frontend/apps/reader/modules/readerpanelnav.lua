@@ -20,6 +20,7 @@ local RenderText = require("ui/rendertext")
 local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
+local optionsutil = require("ui/data/optionsutil")
 local _ = require("gettext")
 local Screen = Device.screen
 
@@ -120,23 +121,13 @@ function ReaderPanelNav:setPanelDirection(direction)
 end
 
 --[[--
-Get human-readable description of a direction code.
+Get the label of a direction code, the same as for the zoom direction option.
 
 @param direction string Direction code
-@treturn string Human-readable description
+@treturn string Label, or the code itself if unknown
 --]]
 function ReaderPanelNav:getDirectionDescription(direction)
-    local descriptions = {
-        LRTB = _("Left to right, top to bottom"),
-        LRBT = _("Left to right, bottom to top"),
-        RLTB = _("Right to left, top to bottom"),
-        RLBT = _("Right to left, bottom to top"),
-        TBLR = _("Top to bottom, left to right"),
-        TBRL = _("Top to bottom, right to left"),
-        BTLR = _("Bottom to top, left to right"),
-        BTRL = _("Bottom to top, right to left"),
-    }
-    return descriptions[direction] or direction
+    return optionsutil.zoom_direction_labels[direction] or direction
 end
 
 --[[--

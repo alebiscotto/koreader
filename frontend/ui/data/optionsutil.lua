@@ -24,6 +24,17 @@ local optionsutil = {
         Screen.DEVICE_ROTATED_CLOCKWISE,         -- 1
         Screen.DEVICE_ROTATED_UPSIDE_DOWN,       -- 2
     },
+    -- keyed by direction code, as in the direction.* icon names
+    zoom_direction_labels = {
+        LRTB = _("Left to Right, Top to Bottom"),
+        TBLR = _("Top to Bottom, Left to Right"),
+        LRBT = _("Left to Right, Bottom to Top"),
+        BTLR = _("Bottom to Top, Left to Right"),
+        BTRL = _("Bottom to Top, Right to Left"),
+        RLBT = _("Right to Left, Bottom to Top"),
+        TBRL = _("Top to Bottom, Right to Left"),
+        RLTB = _("Right to Left, Top to Bottom"),
+    },
 }
 
 function optionsutil.enableIfEquals(configurable, option, value)

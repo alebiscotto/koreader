@@ -598,6 +598,24 @@ describe("ReaderPanelNav module", function()
         it("should return direction code for unknown direction", function()
             assert.are.equal("UNKNOWN", panelnav:getDirectionDescription("UNKNOWN"))
         end)
+
+        it("should match the labels of the zoom direction option", function()
+            local KoptOptions = require("ui/data/koptoptions")
+            local zoom_direction
+            for _, tab in ipairs(KoptOptions) do
+                for _, option in ipairs(tab.options) do
+                    if option.name == "zoom_direction" then
+                        zoom_direction = option
+                    end
+                end
+            end
+            assert.is_not_nil(zoom_direction)
+            assert.are.equal(8, #zoom_direction.item_icons)
+            for i, icon in ipairs(zoom_direction.item_icons) do
+                local code = icon:match("^direction%.(%u+)$")
+                assert.are.equal(zoom_direction.labels[i], panelnav:getDirectionDescription(code))
+            end
+        end)
     end)
 
     describe("direction_settings", function()
