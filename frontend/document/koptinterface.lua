@@ -21,6 +21,9 @@ local ffi = require("ffi")
 
 require "ffi/posix_h"
 
+-- see KoptInterface:getPanelDetectionContext()
+local PANEL_DETECTION_PIXELS = 1000000
+
 local KoptInterface = {
     ocrengine = "ocrengine",
     -- If `$TESSDATA_PREFIX` is set, don't override it: let libk2pdfopt honor it
@@ -741,32 +744,58 @@ function KoptInterface:getReflowedTextBoxesFromScratch(doc, pageno)
     end
 end
 
-function KoptInterface:getPanelFromPage(doc, pageno, ges)
+--[[--
+Render a page for panel detection.
+
+The whole page is rendered at a size of about PANEL_DETECTION_PIXELS pixels, whatever its size in
+the document: the images of comic book archives come at any resolution, and their size in the
+document depends on the one they declare (96 dpi if none).
+
+@param doc document object
+@param pageno page number
+@treturn KOPTContext context with the page rendered in its src bitmap, to be freed
+@treturn number the zoom the page was rendered at: native page coordinates times zoom are pixels
+--]]
+function KoptInterface:getPanelDetectionContext(doc, pageno)
     local page_size = Document.getNativePageDimensions(doc, pageno)
     local bbox = {
         x0 = 0, y0 = 0,
         x1 = page_size.w,
         y1 = page_size.h,
     }
+    local zoom = math.sqrt(PANEL_DETECTION_PIXELS / (page_size.w * page_size.h))
     local kc = self:createContext(doc, pageno, bbox)
-    kc:setZoom(1.0)
+    kc:setZoom(zoom)
     local page = doc._document:openPage(pageno)
     page:getPagePix(kc, doc.render_mode, doc.configurable.background_cleanup)
-    local panel = kc:getPanelFromPage(ges)
     page:close()
+    return kc, zoom
+end
+
+-- A panel in rendered pixels to native page coordinates
+local function panelToNative(panel, zoom)
+    return {
+        x = panel.x / zoom,
+        y = panel.y / zoom,
+        w = panel.w / zoom,
+        h = panel.h / zoom,
+    }
+end
+
+function KoptInterface:getPanelFromPage(doc, pageno, ges)
+    local kc, zoom = self:getPanelDetectionContext(doc, pageno)
+    local panel = kc:getPanelFromPage({ x = ges.x * zoom, y = ges.y * zoom })
     kc:free()
-    return panel
+    return panel and panelToNative(panel, zoom)
 end
 
 --[[--
-Get all panels from a page.
-
-Returns an array of panel bounding boxes detected on the page.
-Panels are sorted according to reading direction settings.
+Get the bounding boxes of all the panels detected on a page.
 
 @param doc document object
 @param pageno page number
-@treturn table array of panel rectangles {x, y, w, h}, or nil if no panels found
+@treturn table unsorted array of panel rectangles {x, y, w, h} in native page coordinates, or nil
+if the page has no panels to show one at a time (it is shown whole)
 --]]
 function KoptInterface:getAllPanelsFromPage(doc, pageno)
     local hash = "allpanels|"..doc.file.."|"..pageno
@@ -775,22 +804,18 @@ function KoptInterface:getAllPanelsFromPage(doc, pageno)
         return cached.panels
     end
 
-    local page_size = Document.getNativePageDimensions(doc, pageno)
-    local bbox = {
-        x0 = 0, y0 = 0,
-        x1 = page_size.w,
-        y1 = page_size.h,
-    }
-    local kc = self:createContext(doc, pageno, bbox)
-    kc:setZoom(1.0)
-    local page = doc._document:openPage(pageno)
-    page:getPagePix(kc, doc.render_mode, doc.configurable.background_cleanup)
+    local kc, zoom = self:getPanelDetectionContext(doc, pageno)
     local panels = kc:getAllPanelsFromPage()
-    page:close()
     kc:free()
+    if panels then
+        for i, panel in ipairs(panels) do
+            panels[i] = panelToNative(panel, zoom)
+        end
+    end
 
     if panels then
-        DocCache:insert(hash, CacheItem:new{ panels = panels, size = #panels * 32 })
+        -- estimation: each {x, y, w, h} table takes 160 bytes, like the bboxes above, plus its array slot
+        DocCache:insert(hash, CacheItem:new{ panels = panels, size = #panels * (160 + 8) })
     end
     return panels
 end
