@@ -958,7 +958,6 @@ function ReaderHighlight:genPanelZoomMenu()
                 end,
             })
         end
-        -- Add panel navigation options at top level
         table.insert(menu, {
             text = _("Enable panel navigation"),
             help_text = _("Navigate through comics/manga panel-by-panel with automatic panel detection. Use the left/right arrow keys or tap the left/right sides of a zoomed panel to move between panels."),
@@ -1758,14 +1757,11 @@ function ReaderHighlight:onPanelZoom(arg, ges)
     local rect = self.ui.document:getPanelFromPage(hold_pos.page, hold_pos)
     if not rect then return false end -- panel not found, return
 
-    -- Delegate to panelnav module if available
     if self.ui.panelnav and self.ui.panelnav.panel_nav_enabled then
         local panelnav = self.ui.panelnav
-
-        -- Initialize panel navigation state from this position
+        -- navigation starts from the panel at the hold position
         local panels = panelnav:getPanelsForCurrentPage()
         if panels and #panels > 0 then
-            -- Find which panel we're viewing based on tap position
             local found_index = 0
             for i, panel in ipairs(panels) do
                 if hold_pos.x >= panel.x and hold_pos.x <= panel.x + panel.w and
@@ -1774,18 +1770,14 @@ function ReaderHighlight:onPanelZoom(arg, ges)
                     break
                 end
             end
-            -- Fallback: if no match found, set to 1
             panelnav.current_panel_index = found_index > 0 and found_index or 1
         else
             panelnav.current_panel_index = 1
         end
-
-        -- Use panelnav's showPanel which handles everything
         panelnav:showPanel(rect)
         return true
     end
 
-    -- Existing: show panel without navigation (panelnav module not available)
     local image, rotate = self.ui.document:drawPagePart(hold_pos.page, rect, 0)
 
     if image then

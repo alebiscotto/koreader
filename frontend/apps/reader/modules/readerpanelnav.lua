@@ -1,9 +1,7 @@
 --[[--
-Panel navigation module for comics/manga.
+Panel-by-panel navigation for comics and manga in paged documents.
 
-This module enables panel-by-panel navigation in paged documents (PDF, DjVu).
-Panels are detected automatically using image analysis and can be navigated
-in the order specified by zoom_direction_settings (reading direction).
+The panels detected on the page are visited in the panel reading direction.
 
 @module readerpanelnav
 --]]
@@ -37,11 +35,8 @@ local ReaderPanelNav = InputContainer:extend{
     highlight_current_panel = false, -- highlight only the current panel
     show_panel_boxes = false,   -- show bounding boxes around all detected panels (debug)
 
-    -- Panel reading direction setting
-    -- Options: LRTB, LRBT, RLTB, RLBT, TBLR, TBRL, BTLR, BTRL
-    panel_direction = "LRTB",  -- default: left-to-right, top-to-bottom
+    panel_direction = "LRTB", -- one of the keys of direction_settings
 
-    -- Direction settings lookup table
     -- Each direction defines: primary axis (h/v), primary order (+/-), secondary order (+/-)
     -- h = horizontal first (row mode), v = vertical first (column mode)
     -- + = increasing (left-to-right or top-to-bottom), - = decreasing (right-to-left or bottom-to-top)
@@ -73,7 +68,6 @@ function ReaderPanelNav:init()
 end
 
 function ReaderPanelNav:onReadSettings(config)
-    -- Use hasNot to check if setting exists, otherwise use global or default
     if config:has("panel_nav_enabled") then
         self.panel_nav_enabled = config:isTrue("panel_nav_enabled")
     else
@@ -131,142 +125,22 @@ function ReaderPanelNav:getDirectionDescription(direction)
 end
 
 --[[--
-Assign row and column indices to panels based on 30% overlap.
-Panels are grouped into lanes (rows/columns) and indices are assigned.
+Group panels into rows, in left to right, top to bottom order.
 
-@param panels array of panel rectangles {x, y, w, h}
-@treturn table panels with row/col fields added
+Panels are taken top to bottom, then left to right. A panel that is not left of the
+previous one joins the current row if it overlaps it vertically. A panel back on the
+left joins it only if it fits within its vertical extent, so that a tall panel can span
+several rows of smaller ones; otherwise it starts a new row. A panel with no other panel
+ending further right at some height doesn't extend the vertical extent of the row it joins.
+
+@param panels non-empty array of panel rectangles {x, y, w, h}
+@treturn table array of rows {start_y, end_y, panels}, with the panels of each row sorted left to right
 --]]
-function ReaderPanelNav:assignGridByOverlap(panels)
-    if not panels or #panels == 0 then
-        return panels
-    end
+function ReaderPanelNav:sortLRTB(panels)
+    local POS_THRESHOLD = 5 -- positions closer than this are considered equal
+    local BUCKET_SIZE = 8   -- height of the horizontal bands used to find the rightmost panels
 
-    local direction = self.panel_direction or "LRTB"
-
-    -- Helper to find unique lanes (Rows or Columns) based on 30% overlap
-    local function getLanes(axis, dim)
-        local lanes = {}
-
-        -- Sort panels by dimension size (smallest first) so narrow/short panels
-        -- establish lanes before wide/tall panels can merge them
-        local sorted_panels = {}
-        for i, p in ipairs(panels) do
-            sorted_panels[i] = p
-        end
-        table.sort(sorted_panels, function(a, b)
-            return a[dim] < b[dim]
-        end)
-
-        for _, p in ipairs(sorted_panels) do
-            local found = false
-            for _, lane in ipairs(lanes) do
-                -- Calculate overlap between panel and existing lane
-                local overlapStart = math.max(p[axis], lane.start)
-                local overlapEnd = math.min(p[axis] + p[dim], lane.stop)
-                local overlapSize = overlapEnd - overlapStart
-
-                -- Check if overlap is > 30% of either the panel or the lane height/width
-                if overlapSize > 0 then
-                    local ratio = overlapSize / math.min(p[dim], lane.stop - lane.start)
-                    if ratio > 0.30 then
-                        found = true
-                        -- Expand lane boundaries to encompass this panel
-                        lane.start = math.min(lane.start, p[axis])
-                        lane.stop = math.max(lane.stop, p[axis] + p[dim])
-                        break
-                    end
-                end
-            end
-            if not found then
-                table.insert(lanes, { start = p[axis], stop = p[axis] + p[dim] })
-            end
-        end
-        -- Sort lanes based on position (ascending by default)
-        table.sort(lanes, function(a, b) return a.start < b.start end)
-        return lanes
-    end
-
-    -- Identify all global rows and columns
-    local rows = getLanes("y", "h")
-    local cols = getLanes("x", "w")
-
-    -- Handle reverse directions (BT or RL) by reversing the lane indices
-    if direction:find("BT") then
-        table.sort(rows, function(a, b) return a.start > b.start end)
-    end
-    if direction:find("RL") then
-        table.sort(cols, function(a, b) return a.start > b.start end)
-    end
-
-    -- Assign row/column indices to each panel
-    for _, p in ipairs(panels) do
-        -- Assign row
-        for i, row in ipairs(rows) do
-            local overlap = math.min(p.y + p.h, row.stop) - math.max(p.y, row.start)
-            -- Use min of panel height and lane height for consistent comparison with getLanes
-            local minHeight = math.min(p.h, row.stop - row.start)
-            if overlap / minHeight > 0.30 then
-                p.row = i
-                break
-            end
-        end
-        -- Assign column
-        for j, col in ipairs(cols) do
-            local overlap = math.min(p.x + p.w, col.stop) - math.max(p.x, col.start)
-            -- Use min of panel width and lane width for consistent comparison with getLanes
-            local minWidth = math.min(p.w, col.stop - col.start)
-            if overlap / minWidth > 0.30 then
-                p.col = j
-                break
-            end
-        end
-        logger.dbg("ReaderPanelNav: panel", p.x, p.y, p.w, p.h, "-> row", p.row, "col", p.col)
-    end
-
-    logger.dbg("ReaderPanelNav: rows:", #rows, "cols:", #cols)
-    for i, row in ipairs(rows) do
-        logger.dbg("  row", i, ":", row.start, "-", row.stop)
-    end
-    for j, col in ipairs(cols) do
-        logger.dbg("  col", j, ":", col.start, "-", col.stop)
-    end
-    return panels
-end
-
---[[--
-Sort panels in LRTB order (left-to-right, top-to-bottom).
-
-Algorithm Overview:
-1. Identify rightmost panels per Y-bucket to avoid expanding row bounds with edge panels
-2. Sort panels by Y then X (top-to-bottom, left-to-right) as initial reading order
-3. Group panels into rows by detecting X-axis wrapping (when X decreases)
-   - New rows always start from a leftmost panel with its full Y bounds preserved
-4. For wrap-left events: check if panel fits within current row's Y extent
-   - Fit: add to same row (allows tall panels on left to bridge across)
-   - No fit: close row and start new row with this leftmost panel
-5. For continuing right: check Y overlap with current row
-   - Overlap: add to same row
-   - No overlap: close row and start new row with this leftmost panel
-6. Within each row, sort panels by X then Y for final reading order
-
-Key insight: New rows always start from a leftmost panel, so we initialize with its full
-bounds and expand only when adding subsequent panels (except rightmost panels which don't expand).
-
-@param panels array of panel rectangles {x, y, w, h, ref?}
-@param overlap_threshold unused (kept for API compatibility)
-@treturn table array of rows, each containing sorted panels
---]]
-function ReaderPanelNav:sortLRTB(panels, overlap_threshold)
-    if not panels or #panels == 0 then
-        return {}
-    end
-
-    local POS_THRESHOLD = 5      -- Positions within 5 pixels are considered equal
-    local BUCKET_SIZE = 8        -- Y bucket size for rightmost detection
-
-    -- Step 1: Identify rightmost panels in each Y bucket
-    -- Rightmost panels don't expand row bounds (they're edge panels)
+    -- a panel is rightmost if no other panel ends further right in one of the bands it spans
     local rightmost_by_bucket = {}
     for _, panel in ipairs(panels) do
         local panel_right = panel.x + panel.w
@@ -279,27 +153,23 @@ function ReaderPanelNav:sortLRTB(panels, overlap_threshold)
             end
         end
     end
-
-    -- Mark all panels that are rightmost in ANY bucket they span
     local is_rightmost = {}
     for _, info in pairs(rightmost_by_bucket) do
         is_rightmost[info.panel] = true
     end
 
-    -- Step 2: Sort panels by Y then X (reading order)
     local sorted = {}
     for i, p in ipairs(panels) do
         sorted[i] = p
     end
     table.sort(sorted, function(a, b)
         if math.abs(a.y - b.y) > POS_THRESHOLD then
-            return a.y < b.y  -- Different rows: sort by Y
+            return a.y < b.y
         else
-            return a.x < b.x  -- Same row: sort by X
+            return a.x < b.x
         end
     end)
 
-    -- Step 3: Group panels into rows
     local rows = {}
     local current_row = nil
     local prev_x = -math.huge
@@ -307,33 +177,25 @@ function ReaderPanelNav:sortLRTB(panels, overlap_threshold)
     for _, panel in ipairs(sorted) do
         local p_top = panel.y
         local p_bottom = panel.y + panel.h
-
-        -- Detect if X coordinate wraps back to left
         local wrapped_left = panel.x < prev_x - POS_THRESHOLD
 
         if current_row == nil then
-            -- Start first row: leftmost panel with its full Y bounds preserved
             current_row = {
                 start_y = p_top,
                 end_y = p_bottom,
                 panels = { panel },
             }
         elseif wrapped_left then
-            -- X wrapped left: check if panel fits within current row's Y extent
             local fits_in_current_row = p_top >= current_row.start_y - POS_THRESHOLD and
                                         p_bottom <= current_row.end_y + POS_THRESHOLD
 
             if fits_in_current_row then
-                -- Panel fits: add to same row (tall panel bridges columns)
                 table.insert(current_row.panels, panel)
                 if not is_rightmost[panel] then
-                    -- Expand row bounds unless this is a rightmost panel
                     current_row.start_y = math.min(current_row.start_y, p_top)
                     current_row.end_y = math.max(current_row.end_y, p_bottom)
                 end
             else
-                -- Doesn't fit: close current row and start new row
-                -- New row starts from this leftmost panel with its full Y bounds
                 table.insert(rows, current_row)
                 current_row = {
                     start_y = p_top,
@@ -342,22 +204,17 @@ function ReaderPanelNav:sortLRTB(panels, overlap_threshold)
                 }
             end
         else
-            -- X continuing right: check if panel overlaps current row's Y extent
             local overlap_start = math.max(p_top, current_row.start_y)
             local overlap_end = math.min(p_bottom, current_row.end_y)
             local has_overlap = overlap_end > overlap_start
 
             if has_overlap then
-                -- Overlaps: add to same row
                 table.insert(current_row.panels, panel)
                 if not is_rightmost[panel] then
-                    -- Expand row bounds unless this is a rightmost panel
                     current_row.start_y = math.min(current_row.start_y, p_top)
                     current_row.end_y = math.max(current_row.end_y, p_bottom)
                 end
             else
-                -- No overlap: close current row and start new row
-                -- New row starts from this leftmost panel with its full Y bounds
                 table.insert(rows, current_row)
                 current_row = {
                     start_y = p_top,
@@ -369,13 +226,10 @@ function ReaderPanelNav:sortLRTB(panels, overlap_threshold)
 
         prev_x = panel.x
     end
-
-    -- Add the final row
     if current_row then
         table.insert(rows, current_row)
     end
 
-    -- Step 4: Sort panels within each row by X then Y
     for _, row in ipairs(rows) do
         table.sort(row.panels, function(a, b)
             if math.abs(a.x - b.x) > POS_THRESHOLD then
@@ -405,7 +259,7 @@ function ReaderPanelNav:sortPanelsByReadingDirection(panels)
     local primary, secondary = direction:sub(1, 2), direction:sub(3, 4)
     local is_row_first = (primary == "LR" or primary == "RL")
 
-    -- 1. Transform coordinates to LRTB-equivalent
+    -- transform the coordinates so that the panels can be sorted as LRTB
     local transformed = {}
     for i, p in ipairs(panels) do
         local tp = { x = p.x, y = p.y, w = p.w, h = p.h, ref = p }
@@ -426,10 +280,9 @@ function ReaderPanelNav:sortPanelsByReadingDirection(panels)
         transformed[i] = tp
     end
 
-    -- 2. Sort using standard LRTB logic
     local rows = self:sortLRTB(transformed)
 
-    -- 3. Map back to original panels with row/col assigned
+    -- back to the original panels, with their row and column
     local sorted = {}
     for r_idx, row in ipairs(rows) do
         for c_idx, tp in ipairs(row.panels) do
@@ -441,7 +294,6 @@ function ReaderPanelNav:sortPanelsByReadingDirection(panels)
             table.insert(sorted, tp.ref)
         end
     end
-
 
     logger.dbg("ReaderPanelNav: sorted order (direction:", direction, "):")
     for i, p in ipairs(sorted) do
@@ -459,24 +311,8 @@ Check if panel A is completely contained within panel B.
 @treturn bool true if A is completely inside B
 --]]
 function ReaderPanelNav:isPanelContainedIn(a, b)
-    -- A is contained in B if all corners of A are within B
-    local a_left = a.x
-    local a_right = a.x + a.w
-    local a_top = a.y
-    local a_bottom = a.y + a.h
-
-    local b_left = b.x
-    local b_right = b.x + b.w
-    local b_top = b.y
-    local b_bottom = b.y + b.h
-
-    -- A is inside B if B's boundaries completely enclose A
-    -- Use a small tolerance (0 pixel) to handle floating point issues
-    local tolerance = 0
-    return a_left >= b_left - tolerance and
-           a_right <= b_right + tolerance and
-           a_top >= b_top - tolerance and
-           a_bottom <= b_bottom + tolerance
+    return a.x >= b.x and a.x + a.w <= b.x + b.w and
+           a.y >= b.y and a.y + a.h <= b.y + b.h
 end
 
 --[[--
@@ -498,8 +334,7 @@ function ReaderPanelNav:filterNestedPanels(panels)
 
         for j, panel_b in ipairs(panels) do
             if i ~= j then
-                -- Check if panel_a is contained within panel_b
-                -- but panel_b is not contained within panel_a (avoid equal panels)
+                -- equal panels are not nested
                 if self:isPanelContainedIn(panel_a, panel_b) and
                    not self:isPanelContainedIn(panel_b, panel_a) then
                     is_nested = true
@@ -581,11 +416,9 @@ function ReaderPanelNav:mergeOverlappingPanels(panels, overlap_threshold)
 
     overlap_threshold = overlap_threshold or 0.3
 
-    -- Keep merging until no more merges happen
+    -- keep merging until no more merges happen
     local merged = true
     local result = {}
-
-    -- Copy panels to result
     for _, p in ipairs(panels) do
         table.insert(result, { x = p.x, y = p.y, w = p.w, h = p.h })
     end
@@ -605,14 +438,10 @@ function ReaderPanelNav:mergeOverlappingPanels(panels, overlap_threshold)
                         local intersection = self:getPanelIntersectionArea(current, other)
 
                         if intersection > 0 then
-                            -- Calculate areas
                             local area_current = current.w * current.h
                             local area_other = other.w * other.h
                             local smaller_area = math.min(area_current, area_other)
-
-                            -- Check if overlap is significant
                             if intersection / smaller_area >= overlap_threshold then
-                                -- Merge the panels
                                 current = self:mergePanels(current, other)
                                 merged_indices[j] = true
                                 merged = true
@@ -654,23 +483,13 @@ function ReaderPanelNav:clipPanelsToPage(panels, page_width, page_height)
     local clipped = {}
 
     for _, panel in ipairs(panels) do
-        -- Calculate panel boundaries
-        local left = panel.x
-        local top = panel.y
-        local right = panel.x + panel.w
-        local bottom = panel.y + panel.h
-
-        -- Clip to page boundaries
-        local clipped_left = math.max(0, left)
-        local clipped_top = math.max(0, top)
-        local clipped_right = math.min(page_width, right)
-        local clipped_bottom = math.min(page_height, bottom)
-
-        -- Calculate new width and height
+        local clipped_left = math.max(0, panel.x)
+        local clipped_top = math.max(0, panel.y)
+        local clipped_right = math.min(page_width, panel.x + panel.w)
+        local clipped_bottom = math.min(page_height, panel.y + panel.h)
         local clipped_w = clipped_right - clipped_left
         local clipped_h = clipped_bottom - clipped_top
-
-        -- Only keep panels with positive dimensions (visible on page)
+        -- panels outside of the page are dropped
         if clipped_w > 0 and clipped_h > 0 then
             table.insert(clipped, {
                 x = clipped_left,
@@ -768,9 +587,7 @@ function ReaderPanelNav:onGotoNextPanel()
     if not panels or #panels == 0 then
         -- No panels on this page, go to next page
         logger.dbg("ReaderPanelNav: no panels, going to next page")
-        self._turning_page = true
         self.ui:handleEvent(Event:new("GotoViewRel", 1))
-        self._turning_page = false
         return true
     end
 
@@ -785,9 +602,7 @@ function ReaderPanelNav:onGotoNextPanel()
         self.current_panel_index = 0
         self.current_page_panels = nil
         self.panels_page = nil
-        self._turning_page = true
         self.ui:handleEvent(Event:new("GotoViewRel", 1))
-        self._turning_page = false
     end
 
     return true
@@ -817,11 +632,7 @@ function ReaderPanelNav:onGotoPrevPanel()
         -- At full page view, go to previous page and show last panel
         self.current_page_panels = nil
         self.panels_page = nil
-        self._turning_page = true
         self.ui:handleEvent(Event:new("GotoViewRel", -1))
-        self._turning_page = false
-        -- After page change, we need to get panels for the new page
-        -- and navigate to the last panel
         UIManager:nextTick(function()
             local new_panels = self:getPanelsForCurrentPage()
             if new_panels and #new_panels > 0 then
@@ -1101,7 +912,6 @@ Enter panel navigation mode - show current panel in ImageViewer.
 Navigation keys only work if panel navigation is enabled.
 --]]
 function ReaderPanelNav:onEnterPanelNavMode()
-    -- Check if panel zoom is enabled
     if self.ui.highlight and not self.ui.highlight.panel_zoom_enabled then
         UIManager:show(InfoMessage:new{
             text = _("Panel zoom must be enabled first."),
@@ -1110,10 +920,9 @@ function ReaderPanelNav:onEnterPanelNavMode()
         return true
     end
 
-    -- Get panels and show current one (or first if none selected)
     local panels = self:getPanelsForCurrentPage()
     if panels and #panels > 0 then
-        -- If no current panel or index out of range, start at first panel
+        -- no current panel, or one from a previous detection: start at the first one
         if self.current_panel_index < 1 or self.current_panel_index > #panels then
             self.current_panel_index = 1
         end
@@ -1164,17 +973,12 @@ This is called by ReaderView as a registered view module.
 @param y Y offset
 --]]
 function ReaderPanelNav:paintTo(bb, x, y)
-    -- Check if any visualization is enabled
     if not self.show_panel_boxes and not self.highlight_current_panel then
         return
     end
-
-    -- Don't show boxes if panel zoom is disabled
     if self.ui.highlight and not self.ui.highlight.panel_zoom_enabled then
         return
     end
-
-    -- Don't show boxes if panel navigation is disabled
     if not self.panel_nav_enabled then
         return
     end
@@ -1184,56 +988,30 @@ function ReaderPanelNav:paintTo(bb, x, y)
         return
     end
 
-    -- Colors
-    local box_color = Blitbuffer.ColorRGB24(0x00, 0xCC, 0x00)  -- Light green for all panels
-    local current_box_color = Blitbuffer.ColorRGB24(0xFF, 0x00, 0x00)  -- Red for current panel
+    local box_color = Blitbuffer.ColorRGB24(0x00, 0xCC, 0x00)  -- green for all the panels
+    local current_box_color = Blitbuffer.ColorRGB24(0xFF, 0x00, 0x00)  -- red for the current one
     local line_width = Size.line.thick
-
-    -- Font for panel numbers (only used for debug view)
     local number_font = Font:getFace("infofont", 14)
 
     for i, panel in ipairs(panels) do
-        -- Transform panel coordinates from page to screen
         local rect = self.view:pageToScreenTransform(self.panels_page, panel)
-        if rect then
-            local is_current = (i == self.current_panel_index)
+        local is_current = i == self.current_panel_index
+        -- without show_panel_boxes, only the current panel is highlighted
+        if rect and (self.show_panel_boxes or is_current) then
+            local color = is_current and current_box_color or box_color
+            bb:paintRectRGB32(rect.x, rect.y, rect.w, line_width, color)
+            bb:paintRectRGB32(rect.x, rect.y + rect.h - line_width, rect.w, line_width, color)
+            bb:paintRectRGB32(rect.x, rect.y, line_width, rect.h, color)
+            bb:paintRectRGB32(rect.x + rect.w - line_width, rect.y, line_width, rect.h, color)
 
-            -- Determine if we should draw this panel
-            local should_draw = false
+            -- debug: panel number, in white on the box color
             if self.show_panel_boxes then
-                -- Debug mode: draw all panels
-                should_draw = true
-            elseif self.highlight_current_panel and is_current then
-                -- Highlight current panel only
-                should_draw = true
-            end
-
-            if should_draw then
-                local color = is_current and current_box_color or box_color
-
-                -- Draw rectangle border (4 lines)
-                -- Top
-                bb:paintRectRGB32(rect.x, rect.y, rect.w, line_width, color)
-                -- Bottom
-                bb:paintRectRGB32(rect.x, rect.y + rect.h - line_width, rect.w, line_width, color)
-                -- Left
-                bb:paintRectRGB32(rect.x, rect.y, line_width, rect.h, color)
-                -- Right
-                bb:paintRectRGB32(rect.x + rect.w - line_width, rect.y, line_width, rect.h, color)
-
-                -- Only draw panel number in debug mode (show_panel_boxes)
-                if self.show_panel_boxes then
-                    local num_text = tostring(i)
-                    local text_size = RenderText:sizeUtf8Text(0, Screen:getWidth(), number_font, num_text)
-                    local num_w = text_size.x + 8
-                    local num_h = number_font.size + 4
-
-                    -- Draw background rectangle for number
-                    bb:paintRectRGB32(rect.x + 4, rect.y + 4, num_w, num_h, color)
-
-                    -- Draw the number text (white text on colored background)
-                    RenderText:renderUtf8Text(bb, rect.x + 8, rect.y + 4 + number_font.size - 2, number_font, num_text, false, false, Blitbuffer.COLOR_WHITE)
-                end
+                local num_text = tostring(i)
+                local text_size = RenderText:sizeUtf8Text(0, Screen:getWidth(), number_font, num_text)
+                local num_w = text_size.x + 8
+                local num_h = number_font.size + 4
+                bb:paintRectRGB32(rect.x + 4, rect.y + 4, num_w, num_h, color)
+                RenderText:renderUtf8Text(bb, rect.x + 8, rect.y + 4 + number_font.size - 2, number_font, num_text, false, false, Blitbuffer.COLOR_WHITE)
             end
         end
     end
