@@ -1685,8 +1685,8 @@ function ReaderHighlight:onPanelZoom(arg, ges)
     if image then
         local ImageViewer = require("ui/widget/imageviewer")
         local imgviewer = ImageViewer:new{
-            image = image,
-            image_disposable = false, -- It's a TileCache item
+            image = image:copy(), -- the TileCache item may be freed while shown, e.g., on low memory
+            image_disposable = true,
             with_title_bar = false,
             fullscreen = true,
             rotated = rotate,
